@@ -5,9 +5,10 @@ Week 1-12 implementation for ASE core metrics, mutation stress testing, arbitrat
 ## Quickstart
 
 ```bash
-python -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -e .[dev]
+python -m pip install --upgrade pip
+python -m pip install -e .[dev]
 python -m pytest
 python -m ruff check .
 python -m black --check .
@@ -44,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ruth411/Stabilium@main
+      - uses: ruthwikdovala/Stabilium@main
         with:
           suite: examples/benchmarks/reasoning_suite.json
           baseline: examples/baselines/reasoning_suite.baseline.json
@@ -55,7 +56,7 @@ jobs:
 For OpenAI-backed runs, add:
 
 ```yaml
-      - uses: ruth411/Stabilium@main
+      - uses: ruthwikdovala/Stabilium@main
         with:
           suite: examples/benchmarks/reasoning_suite.json
           baseline: examples/baselines/reasoning_suite.baseline.json
@@ -63,7 +64,31 @@ For OpenAI-backed runs, add:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
+## Build, Publish, Install (Python 3.11 Standard)
+
+Use one interpreter path for the whole release sequence.
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip build twine
+python -m build
+python -m twine upload dist/*
+```
+
+Install verification in a clean environment:
+
+```bash
+python3.11 -m venv .venv-install-check
+source .venv-install-check/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -U agent-stability-engine
+ase --help
+python -c "import agent_stability_engine; print(agent_stability_engine.__version__)"
+```
+
 ## Release Docs
 
+- `docs/BUILD_PUBLISH_INSTALL.md`
 - `docs/RELEASE_CHECKLIST.md`
 - `docs/DEMO_RUNBOOK.md`

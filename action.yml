@@ -88,7 +88,7 @@ runs:
         python -m pip install --upgrade pip
         python -m pip install "agent-stability-engine==0.1.0"
 
-    - name: Run ase regress
+    - name: Run ASE regression
       shell: bash
       env:
         ASE_OPENAI_API_KEY: ${{ inputs.openai-api-key }}
@@ -121,7 +121,7 @@ runs:
           args+=(--embedding-model "${{ inputs.embedding-model }}")
         fi
 
-        ase "${args[@]}"
+        python -m agent_stability_engine.cli "${args[@]}"
 
     - name: Parse Report And Gate
       id: gate
