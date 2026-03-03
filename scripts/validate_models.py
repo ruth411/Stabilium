@@ -43,10 +43,19 @@ def _demo_agent(prompt: str, rng: random.Random | None = None) -> str:
     )
 
 
-def _build_agent(model: str, api_key: str | None) -> object:
-    if model == "demo":
+def _parse_model_spec(spec: str) -> tuple[str, float | None]:
+    """Parse 'gpt-4o-mini@0.5' into ('gpt-4o-mini', 0.5). No '@' → temperature=None."""
+    if "@" in spec:
+        model_name, temp_str = spec.rsplit("@", 1)
+        return model_name, float(temp_str)
+    return spec, None
+
+
+def _build_agent(model_spec: str, api_key: str | None) -> object:
+    if model_spec == "demo":
         return _demo_agent
-    return OpenAIChatAdapter(model=model, api_key=api_key)
+    model_name, temperature = _parse_model_spec(model_spec)
+    return OpenAIChatAdapter(model=model_name, api_key=api_key, temperature=temperature)
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +216,7 @@ def main() -> int:
     args = parser.parse_args()
 
     api_key = os.getenv("OPENAI_API_KEY")
-    real_models = [m for m in args.models if m != "demo"]
+    real_models = [m for m in args.models if m != "demo" and not m.startswith("demo@")]
     if real_models and not api_key:
         print("ERROR: OPENAI_API_KEY environment variable is required for non-demo models.")
         print(f"  Models needing API key: {real_models}")

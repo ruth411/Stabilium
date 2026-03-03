@@ -37,6 +37,7 @@ class OpenAIChatAdapter:
         *,
         model: str,
         api_key: str | None = None,
+        temperature: float | None = None,
         timeout_seconds: float = 30.0,
         max_retries: int = 2,
         min_interval_seconds: float = 0.0,
@@ -50,7 +51,11 @@ class OpenAIChatAdapter:
         if max_retries < 0:
             msg = "max_retries must be >= 0"
             raise ValueError(msg)
+        if temperature is not None and not (0.0 <= temperature <= 2.0):
+            msg = "temperature must be between 0.0 and 2.0"
+            raise ValueError(msg)
         self._model = model
+        self._temperature = temperature
         self._api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self._api_key:
             msg = "OPENAI_API_KEY is required for OpenAI adapter"
@@ -71,6 +76,8 @@ class OpenAIChatAdapter:
             "model": self._model,
             "input": prompt,
         }
+        if self._temperature is not None:
+            payload["temperature"] = self._temperature
 
         attempts = self._max_retries + 1
         for attempt in range(attempts):
