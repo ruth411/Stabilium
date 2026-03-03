@@ -4,11 +4,17 @@
 Usage (demo, no API key needed):
     python scripts/validate_models.py --models demo
 
-Usage (real models, requires OPENAI_API_KEY):
+Usage (OpenAI models, requires OPENAI_API_KEY):
     python scripts/validate_models.py --models gpt-4o-mini gpt-4o gpt-4.1-mini
 
-Usage (mix):
-    python scripts/validate_models.py --models demo gpt-4o-mini
+Usage (Anthropic models, requires ANTHROPIC_API_KEY):
+    python scripts/validate_models.py --models claude-haiku-4-5 claude-sonnet-4-6
+
+Usage (cross-provider comparison):
+    python scripts/validate_models.py --models gpt-4o-mini claude-haiku-4-5
+
+Usage (temperature sensitivity):
+    python scripts/validate_models.py --models gpt-4o-mini@0 gpt-4o-mini@1
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from agent_stability_engine.adapters.anthropic import AnthropicChatAdapter
 from agent_stability_engine.adapters.openai import OpenAIChatAdapter
 from agent_stability_engine.engine.asi import ASIProfile
 from agent_stability_engine.engine.embeddings import EmbeddingProvider
@@ -51,11 +58,13 @@ def _parse_model_spec(spec: str) -> tuple[str, float | None]:
     return spec, None
 
 
-def _build_agent(model_spec: str, api_key: str | None) -> object:
+def _build_agent(model_spec: str, openai_key: str | None, anthropic_key: str | None) -> object:
     if model_spec == "demo":
         return _demo_agent
     model_name, temperature = _parse_model_spec(model_spec)
-    return OpenAIChatAdapter(model=model_name, api_key=api_key, temperature=temperature)
+    if model_name.startswith("claude-"):
+        return AnthropicChatAdapter(model=model_name, api_key=anthropic_key, temperature=temperature)
+    return OpenAIChatAdapter(model=model_name, api_key=openai_key, temperature=temperature)
 
 
 # ---------------------------------------------------------------------------
@@ -215,11 +224,18 @@ def main() -> int:
     parser.add_argument("--output-dir", default="out/validation")
     args = parser.parse_args()
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     real_models = [m for m in args.models if m != "demo" and not m.startswith("demo@")]
-    if real_models and not api_key:
-        print("ERROR: OPENAI_API_KEY environment variable is required for non-demo models.")
-        print(f"  Models needing API key: {real_models}")
+    openai_models = [m for m in real_models if not _parse_model_spec(m)[0].startswith("claude-")]
+    anthropic_models = [m for m in real_models if _parse_model_spec(m)[0].startswith("claude-")]
+    if openai_models and not openai_key:
+        print("ERROR: OPENAI_API_KEY is required for OpenAI models.")
+        print(f"  Models needing key: {openai_models}")
+        return 1
+    if anthropic_models and not anthropic_key:
+        print("ERROR: ANTHROPIC_API_KEY is required for Anthropic (Claude) models.")
+        print(f"  Models needing key: {anthropic_models}")
         return 1
 
     profile = ASIProfile(args.asi_profile)
@@ -242,7 +258,7 @@ def main() -> int:
 
     for model in args.models:
         print(f"\n[{model}] Starting benchmark...")
-        agent_fn = _build_agent(model, api_key)
+        agent_fn = _build_agent(model, openai_key, anthropic_key)
 
         result = run_benchmark_suite(
             suite_path=suite_path,
