@@ -214,6 +214,8 @@ def main() -> int:
     parser.add_argument("--run-count", type=int, default=3, help="Runs per case")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--mutation-limit", type=int, default=6, help="Max mutations per case")
+    parser.add_argument("--max-cases", type=int, default=None, help="Cap number of cases (useful for quick checks)")
+    parser.add_argument("--workers", type=int, default=4, help="Parallel workers for case evaluation (default: 4)")
     parser.add_argument("--asi-profile", default="balanced", choices=["balanced", "safety_strict", "reasoning_focus"])
     parser.add_argument(
         "--embedding-provider",
@@ -268,6 +270,8 @@ def main() -> int:
             asi_profile=profile,
             mutation_sample_limit=args.mutation_limit,
             embedding_provider=EmbeddingProvider(args.embedding_provider),
+            max_cases=args.max_cases,
+            workers=args.workers,
         )
 
         report = result.report

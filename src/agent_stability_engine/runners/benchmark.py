@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -27,11 +28,15 @@ def run_benchmark_suite(
     embedding_provider: EmbeddingProvider = EmbeddingProvider.AUTO,
     embedding_model: str | None = None,
     embedding_openai_api_key: str | None = None,
+    max_cases: int | None = None,
+    workers: int = 1,
 ) -> BenchmarkResult:
     suite_data = json.loads(suite_path.read_text(encoding="utf-8"))
     canonical_suite = json.dumps(suite_data, sort_keys=True, separators=(",", ":"))
     suite_sha256 = hashlib.sha256(canonical_suite.encode()).hexdigest()
     cases = suite_data["cases"]
+    if max_cases is not None and max_cases > 0:
+        cases = cases[:max_cases]
 
     evaluator = StabilityEvaluator(
         asi_profile=asi_profile,
@@ -40,10 +45,8 @@ def run_benchmark_suite(
         embedding_model=embedding_model,
         embedding_openai_api_key=embedding_openai_api_key,
     )
-    case_reports: list[dict[str, object]] = []
-    asi_values: list[float] = []
 
-    for case in cases:
+    def _evaluate_case(case: dict[str, object]) -> dict[str, object]:
         case_prompt = str(case["prompt"])
         case_id = str(case["id"])
         evaluation = evaluator.evaluate(
@@ -54,19 +57,33 @@ def run_benchmark_suite(
             timestamp_utc=timestamp_utc,
         )
         report = evaluation.report
-        case_reports.append(
-            {
-                "case_id": case_id,
-                "prompt_sha256": hashlib.sha256(case_prompt.encode()).hexdigest(),
-                "report": report,
-            }
-        )
+        return {
+            "case_id": case_id,
+            "prompt_sha256": hashlib.sha256(case_prompt.encode()).hexdigest(),
+            "report": report,
+        }
 
-        metrics = report["metrics"]
-        if isinstance(metrics, dict):
-            asi = metrics.get("agent_stability_index")
-            if isinstance(asi, (int, float)):
-                asi_values.append(float(asi))
+    case_reports: list[dict[str, object]] = []
+    asi_values: list[float] = []
+
+    if workers > 1:
+        ordered: dict[int, dict[str, object]] = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_evaluate_case, case): i for i, case in enumerate(cases)}
+            for future in as_completed(futures):
+                ordered[futures[future]] = future.result()
+        case_reports = [ordered[i] for i in range(len(cases))]
+    else:
+        case_reports = [_evaluate_case(case) for case in cases]
+
+    for entry in case_reports:
+        report = entry["report"]
+        if isinstance(report, dict):
+            metrics = report.get("metrics")
+            if isinstance(metrics, dict):
+                asi = metrics.get("agent_stability_index")
+                if isinstance(asi, (int, float)):
+                    asi_values.append(float(asi))
 
     mean_asi = sum(asi_values) / len(asi_values) if asi_values else 0.0
 
