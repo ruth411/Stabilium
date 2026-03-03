@@ -41,9 +41,11 @@ class AnthropicChatAdapter:
         temperature: float | None = None,
         max_tokens: int = 1024,
         timeout_seconds: float = 60.0,
-        max_retries: int = 2,
+        max_retries: int = 4,
+        min_interval_seconds: float = 0.5,
         base_backoff_seconds: float = 0.5,
-        jitter_seconds: float = 0.1,
+        rate_limit_backoff_seconds: float = 30.0,
+        jitter_seconds: float = 0.5,
         sender: Callable[[dict[str, object]], dict[str, object]] | None = None,
     ) -> None:
         if not model:
@@ -68,10 +70,13 @@ class AnthropicChatAdapter:
 
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
+        self._min_interval_seconds = min_interval_seconds
         self._base_backoff_seconds = base_backoff_seconds
+        self._rate_limit_backoff_seconds = rate_limit_backoff_seconds
         self._jitter_seconds = jitter_seconds
         self._sender = sender or self._default_sender
         self._usage = _UsageTotals()
+        self._last_request_monotonic = 0.0
 
     def __call__(self, prompt: str, rng: random.Random | None = None) -> str:
         payload: dict[str, object] = {
@@ -84,16 +89,20 @@ class AnthropicChatAdapter:
 
         attempts = self._max_retries + 1
         for attempt in range(attempts):
+            self._respect_rate_limit()
             try:
                 response = self._sender(payload)
                 input_tokens, output_tokens = _extract_usage(response)
                 self._track_usage(input_tokens, output_tokens)
                 return _extract_text(response)
-            except Exception:
+            except RuntimeError as exc:
                 if attempt >= self._max_retries:
                     raise
                 self._usage.retries += 1
-                self._sleep_backoff(attempt, rng)
+                if "429" in str(exc):
+                    self._sleep_rate_limit(attempt, rng)
+                else:
+                    self._sleep_backoff(attempt, rng)
 
         msg = "unreachable retry state"
         raise RuntimeError(msg)
@@ -148,6 +157,24 @@ class AnthropicChatAdapter:
             (output_tokens / 1_000_000) * out_price
         )
         self._usage.estimated_cost_usd += cost
+
+    def _respect_rate_limit(self) -> None:
+        if self._min_interval_seconds <= 0:
+            return
+        now = time.monotonic()
+        elapsed = now - self._last_request_monotonic
+        remaining = self._min_interval_seconds - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
+        self._last_request_monotonic = time.monotonic()
+
+    def _sleep_rate_limit(self, attempt: int, rng: random.Random | None) -> None:
+        """Longer backoff specifically for 429 rate-limit responses."""
+        delay = self._rate_limit_backoff_seconds * (attempt + 1)
+        if self._jitter_seconds > 0:
+            jitter_source = rng.random() if rng is not None else random.random()
+            delay += jitter_source * self._jitter_seconds
+        time.sleep(delay)
 
     def _sleep_backoff(self, attempt: int, rng: random.Random | None) -> None:
         delay = self._base_backoff_seconds * (2**attempt)
