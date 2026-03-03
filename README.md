@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ruthwikdovala/Stabilium@main
+      - uses: ruth411/Stabilium@main
         with:
           suite: examples/benchmarks/reasoning_suite.json
           baseline: examples/baselines/reasoning_suite.baseline.json
@@ -55,7 +55,7 @@ jobs:
 For OpenAI-backed runs, add:
 
 ```yaml
-      - uses: ruthwikdovala/Stabilium@main
+      - uses: ruth411/Stabilium@main
         with:
           suite: examples/benchmarks/reasoning_suite.json
           baseline: examples/baselines/reasoning_suite.baseline.json

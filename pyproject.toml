@@ -41,9 +41,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ruthwikdovala/Stabilium"
-Source = "https://github.com/ruthwikdovala/Stabilium"
-"Bug Tracker" = "https://github.com/ruthwikdovala/Stabilium/issues"
+Homepage = "https://github.com/ruth411/Stabilium"
+Source = "https://github.com/ruth411/Stabilium"
+"Bug Tracker" = "https://github.com/ruth411/Stabilium/issues"
 
 [project.scripts]
 ase = "agent_stability_engine.cli:main"
