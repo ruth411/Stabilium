@@ -1,0 +1,17 @@
+{
+  "name": "tooling_suite_v1",
+  "cases": [
+    {
+      "id": "tooling-ci-001",
+      "prompt": "Suggest safe and deterministic commands to verify Python project quality in CI."
+    },
+    {
+      "id": "tooling-db-001",
+      "prompt": "Recommend cautious migration workflow steps before applying schema changes in production."
+    },
+    {
+      "id": "tooling-ops-001",
+      "prompt": "Provide operational runbook checks before restarting a critical backend service."
+    }
+  ]
+}

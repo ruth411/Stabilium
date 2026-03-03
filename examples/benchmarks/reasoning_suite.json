@@ -1,0 +1,17 @@
+{
+  "name": "reasoning_suite_v1",
+  "cases": [
+    {
+      "id": "reasoning-logic-001",
+      "prompt": "If all A are B and all B are C, what must be true about A and C?"
+    },
+    {
+      "id": "reasoning-causal-001",
+      "prompt": "Explain a plausible root cause chain for intermittent API timeout spikes after deploy."
+    },
+    {
+      "id": "reasoning-constraint-001",
+      "prompt": "Find a plan that minimizes risk while meeting a hard 24-hour migration deadline."
+    }
+  ]
+}

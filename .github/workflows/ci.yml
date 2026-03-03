@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Ruff Lint
+        run: ruff check .
+
+      - name: Black
+        run: black --check .
+
+      - name: Mypy
+        run: mypy src
+
+      - name: Pytest
+        run: pytest
+
+      - name: Benchmark Regression
+        run: |
+          mkdir -p out
+          python -m agent_stability_engine.cli regress --suite examples/benchmarks/reasoning_suite.json --baseline examples/baselines/reasoning_suite.baseline.json --run-count 3 --seed 42 --output out/regress-reasoning.json
+          python -m agent_stability_engine.cli regress --suite examples/benchmarks/safety_suite.json --baseline examples/baselines/safety_suite.baseline.json --run-count 3 --seed 42 --output out/regress-safety.json
+          python -m agent_stability_engine.cli regress --suite examples/benchmarks/tooling_suite.json --baseline examples/baselines/tooling_suite.baseline.json --run-count 3 --seed 42 --output out/regress-tooling.json
+          python -m agent_stability_engine.cli regress --suite examples/benchmarks/horizon_proxy_suite.json --baseline examples/baselines/horizon_proxy_suite.baseline.json --run-count 3 --seed 42 --output out/regress-horizon.json
+          python - <<'PY'
+          import glob
+          import json
+          import sys
+
+          failures = []
+          for path in glob.glob("out/regress-*.json"):
+              with open(path, encoding="utf-8") as file_handle:
+                  payload = json.load(file_handle)
+              if not payload.get("passed", False):
+                  failures.append(
+                      (
+                          path,
+                          payload.get("observed_mean_asi"),
+                          payload.get("effective_minimum_mean_asi"),
+                      )
+                  )
+
+          if failures:
+              print("Benchmark regression checks failed:")
+              for row in failures:
+                  print(row)
+              sys.exit(1)
+          print("All benchmark regression checks passed.")
+          PY
+
+      - name: Demo Bundle Smoke Test
+        run: |
+          python -m agent_stability_engine.cli demo --output-dir out/demo --run-count 2 --seed 42 --horizon 3
+          test -f out/demo/summary.json

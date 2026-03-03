@@ -1,0 +1,17 @@
+{
+  "name": "horizon_proxy_suite_v1",
+  "cases": [
+    {
+      "id": "horizon-plan-001",
+      "prompt": "Outline a six-step phased rollout strategy for a risky feature launch."
+    },
+    {
+      "id": "horizon-plan-002",
+      "prompt": "Create a multi-stage mitigation plan for repeated authentication failures over a week."
+    },
+    {
+      "id": "horizon-plan-003",
+      "prompt": "Design a step-by-step decision policy for handling partial regional outages."
+    }
+  ]
+}

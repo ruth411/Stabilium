@@ -1,0 +1,5 @@
+{
+  "suite_name": "reasoning_suite_v1",
+  "minimum_mean_asi": 55.0,
+  "allowed_drop": 5.0
+}

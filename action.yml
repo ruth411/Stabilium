@@ -1,0 +1,167 @@
+name: ASE Regression Gate
+description: Run `ase regress` and fail CI when benchmark stability drops below baseline.
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  suite:
+    description: Path to benchmark suite JSON.
+    required: true
+  baseline:
+    description: Path to baseline threshold JSON.
+    required: true
+  output:
+    description: Output path for regression report JSON.
+    required: false
+    default: out/ase-regression.json
+  run-count:
+    description: Number of runs per case.
+    required: false
+    default: "3"
+  seed:
+    description: Deterministic random seed.
+    required: false
+    default: "42"
+  mutation-limit:
+    description: Optional cap on mutation prompts per case.
+    required: false
+    default: ""
+  asi-profile:
+    description: ASI profile (balanced, safety_strict, reasoning_focus).
+    required: false
+    default: balanced
+  agent-provider:
+    description: Agent backend provider (demo or openai).
+    required: false
+    default: demo
+  agent-model:
+    description: Provider model identifier.
+    required: false
+    default: gpt-4o-mini
+  embedding-provider:
+    description: Embedding provider (auto, hash, sentence_transformers, openai).
+    required: false
+    default: auto
+  embedding-model:
+    description: Optional embedding model identifier.
+    required: false
+    default: ""
+  python-version:
+    description: Python version used by the action.
+    required: false
+    default: "3.11"
+  openai-api-key:
+    description: OpenAI API key, required only when using --agent-provider openai or --embedding-provider openai.
+    required: false
+    default: ""
+  fail-on-regression:
+    description: Fail the workflow when regression report `passed` is false.
+    required: false
+    default: "true"
+
+outputs:
+  passed:
+    description: Regression pass/fail from report.
+    value: ${{ steps.gate.outputs.passed }}
+  observed-mean-asi:
+    description: Observed mean ASI from report.
+    value: ${{ steps.gate.outputs.observed_mean_asi }}
+  effective-minimum-mean-asi:
+    description: Effective minimum mean ASI from report.
+    value: ${{ steps.gate.outputs.effective_minimum_mean_asi }}
+  output-path:
+    description: Path to generated regression report.
+    value: ${{ steps.gate.outputs.output_path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Agent Stability Engine
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install "agent-stability-engine==0.1.0"
+
+    - name: Run ase regress
+      shell: bash
+      env:
+        ASE_OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "${{ inputs.output }}")"
+
+        if [ -n "${ASE_OPENAI_API_KEY}" ]; then
+          export OPENAI_API_KEY="${ASE_OPENAI_API_KEY}"
+        fi
+
+        args=(
+          regress
+          --suite "${{ inputs.suite }}"
+          --baseline "${{ inputs.baseline }}"
+          --run-count "${{ inputs.run-count }}"
+          --seed "${{ inputs.seed }}"
+          --asi-profile "${{ inputs.asi-profile }}"
+          --agent-provider "${{ inputs.agent-provider }}"
+          --agent-model "${{ inputs.agent-model }}"
+          --embedding-provider "${{ inputs.embedding-provider }}"
+          --output "${{ inputs.output }}"
+        )
+
+        if [ -n "${{ inputs.mutation-limit }}" ]; then
+          args+=(--mutation-limit "${{ inputs.mutation-limit }}")
+        fi
+
+        if [ -n "${{ inputs.embedding-model }}" ]; then
+          args+=(--embedding-model "${{ inputs.embedding-model }}")
+        fi
+
+        ase "${args[@]}"
+
+    - name: Parse Report And Gate
+      id: gate
+      shell: bash
+      env:
+        OUTPUT_PATH: ${{ inputs.output }}
+        FAIL_ON_REGRESSION: ${{ inputs.fail-on-regression }}
+      run: |
+        python - <<'PY'
+        import json
+        import os
+        import sys
+
+        output_path = os.environ["OUTPUT_PATH"]
+        fail_on_regression = os.environ["FAIL_ON_REGRESSION"].lower() == "true"
+
+        with open(output_path, encoding="utf-8") as file_handle:
+            payload = json.load(file_handle)
+
+        passed = bool(payload.get("passed", False))
+        observed = payload.get("observed_mean_asi")
+        minimum = payload.get("effective_minimum_mean_asi")
+
+        github_output = os.environ["GITHUB_OUTPUT"]
+        with open(github_output, "a", encoding="utf-8") as out_handle:
+            out_handle.write(f"passed={str(passed).lower()}\n")
+            out_handle.write(f"observed_mean_asi={observed}\n")
+            out_handle.write(f"effective_minimum_mean_asi={minimum}\n")
+            out_handle.write(f"output_path={output_path}\n")
+
+        github_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if github_summary:
+            with open(github_summary, "a", encoding="utf-8") as summary:
+                summary.write("## ASE Regression Gate\n")
+                summary.write(f"- `passed`: `{passed}`\n")
+                summary.write(f"- `observed_mean_asi`: `{observed}`\n")
+                summary.write(f"- `effective_minimum_mean_asi`: `{minimum}`\n")
+                summary.write(f"- `report`: `{output_path}`\n")
+
+        if fail_on_regression and not passed:
+            print("ASE regression gate failed.")
+            sys.exit(1)
+        PY

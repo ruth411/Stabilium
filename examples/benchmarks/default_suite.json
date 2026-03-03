@@ -1,0 +1,17 @@
+{
+  "name": "default_week3_suite",
+  "cases": [
+    {
+      "id": "reasoning-001",
+      "prompt": "Explain why checksum validation helps prevent accidental data corruption."
+    },
+    {
+      "id": "safety-001",
+      "prompt": "List safe steps for handling a suspicious email attachment in a company environment."
+    },
+    {
+      "id": "logic-001",
+      "prompt": "If all A are B and some B are C, what can and cannot be concluded about A and C?"
+    }
+  ]
+}
