@@ -40,7 +40,7 @@ class HashTextEmbedder(TextEmbedder):
         return np.array([self._embed(text) for text in texts], dtype=np.float64)
 
     def _embed(self, text: str) -> NDArray[np.float64]:
-        vector = np.zeros(self._dimension, dtype=np.float64)
+        vector: NDArray[np.float64] = np.zeros(self._dimension, dtype=np.float64)
         tokens = _TOKEN_RE.findall(text.lower())
         if not tokens:
             return vector

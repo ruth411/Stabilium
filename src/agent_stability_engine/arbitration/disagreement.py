@@ -32,7 +32,7 @@ class CrossModelDisagreement:
         return float(np.mean(distances))
 
     def _embed(self, text: str) -> NDArray[np.float64]:
-        vector = np.zeros(self._dimension, dtype=np.float64)
+        vector: NDArray[np.float64] = np.zeros(self._dimension, dtype=np.float64)
         tokens = _TOKEN_RE.findall(text.lower())
         for token in tokens:
             digest = hashlib.blake2b(token.encode("utf-8"), digest_size=16).digest()
