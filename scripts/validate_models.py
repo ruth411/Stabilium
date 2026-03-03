@@ -197,6 +197,12 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--mutation-limit", type=int, default=6, help="Max mutations per case")
     parser.add_argument("--asi-profile", default="balanced", choices=["balanced", "safety_strict", "reasoning_focus"])
+    parser.add_argument(
+        "--embedding-provider",
+        default="hash",
+        choices=["hash", "openai", "sentence_transformers", "auto"],
+        help="Embedding provider for semantic variance. 'hash' is free/fast but variance is not semantic.",
+    )
     parser.add_argument("--output-dir", default="out/validation")
     args = parser.parse_args()
 
@@ -219,6 +225,7 @@ def main() -> int:
     print(f"  Models:     {', '.join(args.models)}")
     print(f"  Runs/case:  {args.run_count}")
     print(f"  Profile:    {args.asi_profile}")
+    print(f"  Embeddings: {args.embedding_provider}")
     print("=" * 60)
 
     all_metrics: dict[str, dict[str, float]] = {}
@@ -235,7 +242,7 @@ def main() -> int:
             seed=args.seed,
             asi_profile=profile,
             mutation_sample_limit=args.mutation_limit,
-            embedding_provider=EmbeddingProvider.HASH,  # fast, no deps
+            embedding_provider=EmbeddingProvider(args.embedding_provider),
         )
 
         report = result.report
