@@ -15,7 +15,9 @@ from agent_stability_engine.engine.drift import DriftTracker, metrics_from_repor
 from agent_stability_engine.engine.embeddings import EmbeddingProvider
 from agent_stability_engine.engine.evaluator import StabilityEvaluator
 from agent_stability_engine.engine.self_healing import SelfHealingEngine
+from agent_stability_engine.report.export import build_export_bundle
 from agent_stability_engine.report.manifest import build_manifest
+from agent_stability_engine.report.pdf_renderer import write_compliance_pdf
 from agent_stability_engine.runners.benchmark import run_benchmark_suite
 from agent_stability_engine.runners.horizon import LongHorizonStabilityRunner
 from agent_stability_engine.runners.regression import run_benchmark_regression
@@ -365,6 +367,31 @@ def _build_parser() -> argparse.ArgumentParser:
         "--manifest-output",
         default=None,
         help="Optional manifest JSON path for demo summary reproducibility metadata",
+    )
+
+    export_parser = subparsers.add_parser(
+        "export",
+        help="Generate compliance PDF and signed JSON evidence bundle from a report",
+    )
+    export_parser.add_argument("--input-report", required=True, help="Input report JSON path")
+    export_parser.add_argument(
+        "--history-report",
+        action="append",
+        default=[],
+        help="Optional historical report JSON path (repeatable) for trend section",
+    )
+    export_parser.add_argument("--pdf-output", required=True, help="Output PDF path")
+    export_parser.add_argument("--bundle-output", required=True, help="Output bundle JSON path")
+    export_parser.add_argument(
+        "--signing-key-env",
+        default="ASE_SIGNING_KEY",
+        help="Environment variable for HMAC signing key",
+    )
+    export_parser.add_argument("--fixed-timestamp", default=None)
+    export_parser.add_argument(
+        "--manifest-output",
+        default=None,
+        help="Optional manifest JSON path for reproducibility metadata",
     )
 
     return parser
@@ -861,6 +888,40 @@ def main() -> int:
                     "embedding_model": args.embedding_model,
                     "asi_profile": args.asi_profile,
                     "mutation_limit": args.mutation_limit,
+                    "fixed_timestamp": args.fixed_timestamp,
+                },
+                timestamp_utc=args.fixed_timestamp,
+            )
+            _write_json(Path(args.manifest_output), manifest)
+        return 0
+
+    if args.command == "export":
+        input_report = _read_json(Path(args.input_report))
+        history_reports = [_read_json(Path(path)) for path in args.history_report]
+        signing_key = os.getenv(args.signing_key_env)
+        bundle = build_export_bundle(
+            input_report=input_report,
+            history_reports=history_reports,
+            timestamp_utc=args.fixed_timestamp,
+            signing_key=signing_key,
+        )
+
+        bundle_path = Path(args.bundle_output)
+        _write_json(bundle_path, bundle)
+        write_compliance_pdf(bundle, Path(args.pdf_output))
+
+        if args.manifest_output:
+            manifest = build_manifest(
+                command="export",
+                output_path=bundle_path,
+                output_payload=bundle,
+                input_config={
+                    "input_report": args.input_report,
+                    "history_reports": args.history_report,
+                    "pdf_output": args.pdf_output,
+                    "bundle_output": args.bundle_output,
+                    "signing_key_env": args.signing_key_env,
+                    "has_signing_key": signing_key is not None,
                     "fixed_timestamp": args.fixed_timestamp,
                 },
                 timestamp_utc=args.fixed_timestamp,

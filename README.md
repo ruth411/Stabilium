@@ -30,11 +30,13 @@ python -m agent_stability_engine.cli drift --current-report out/eval.json --base
 python -m agent_stability_engine.cli horizon --prompt "Plan migration strategy" --horizon 6 --run-count 5 --seed 42 --output out/horizon.json
 python -m agent_stability_engine.cli heal --prompt "Provide triage steps" --run-count 5 --seed 42 --max-attempts 2 --output out/heal.json --manifest-output out/heal.manifest.json
 python -m agent_stability_engine.cli demo --output-dir out/demo --run-count 3 --seed 42 --horizon 4 --manifest-output out/demo.manifest.json
+python -m agent_stability_engine.cli export --input-report out/bench.json --history-report out/bench_prev.json --bundle-output out/compliance.bundle.json --pdf-output out/compliance.pdf
 ```
 
 Benchmark and regression outputs now include:
 - `asi_statistics` (`sample_size`, `mean`, `std_dev`, `std_error`, `ci_low`, `ci_high`)
 - `threshold_significance` in regression reports (`p_value`, `significant_pass`)
+- export bundles include signed attestation (`ASE_SIGNING_KEY`) and compliance PDF
 
 ## GitHub Action (Regression Gate)
 
@@ -96,5 +98,6 @@ python -c "import agent_stability_engine; print(agent_stability_engine.__version
 ## Release Docs
 
 - `docs/BUILD_PUBLISH_INSTALL.md`
+- `docs/COMPLIANCE_EXPORT.md`
 - `docs/RELEASE_CHECKLIST.md`
 - `docs/DEMO_RUNBOOK.md`

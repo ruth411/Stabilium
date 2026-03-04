@@ -351,3 +351,58 @@ def test_cli_evaluate_accepts_anthropic_provider(tmp_path: Path, monkeypatch: ob
     assert used_provider == ["anthropic"]
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["schema_version"] == "0.1.0"
+
+
+def test_cli_export_writes_bundle_and_pdf(tmp_path: Path, monkeypatch: object) -> None:
+    input_report = tmp_path / "benchmark.json"
+    input_report.write_text(
+        json.dumps(
+            {
+                "suite_name": "reasoning_suite_v1",
+                "mean_asi": 83.9,
+                "asi_statistics": {
+                    "sample_size": 3,
+                    "mean": 83.9,
+                    "std_dev": 1.0,
+                    "std_error": 0.577,
+                    "confidence_level": 0.95,
+                    "ci_low": 82.9,
+                    "ci_high": 84.9,
+                    "method": "normal_approx",
+                },
+                "timestamp_utc": "2026-03-04T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    bundle_output = tmp_path / "bundle.json"
+    pdf_output = tmp_path / "bundle.pdf"
+
+    monkeypatch.setenv("ASE_SIGNING_KEY", "unit-test-signing-key")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ase",
+            "export",
+            "--input-report",
+            str(input_report),
+            "--bundle-output",
+            str(bundle_output),
+            "--pdf-output",
+            str(pdf_output),
+            "--fixed-timestamp",
+            "2026-03-04T12:00:00Z",
+        ],
+    )
+
+    exit_code = main()
+    assert exit_code == 0
+
+    bundle_payload = json.loads(bundle_output.read_text(encoding="utf-8"))
+    assert bundle_payload["bundle_version"] == "0.1.0"
+    attestation = bundle_payload["attestation"]
+    assert isinstance(attestation, dict)
+    assert attestation["signed"] is True
+    assert isinstance(attestation["signature_hmac_sha256"], str)
+    assert pdf_output.exists()
+    assert pdf_output.read_bytes().startswith(b"%PDF-1.4")
