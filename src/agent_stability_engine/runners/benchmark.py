@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +32,7 @@ def run_benchmark_suite(
     embedding_openai_api_key: str | None = None,
     max_cases: int | None = None,
     workers: int = 1,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> BenchmarkResult:
     suite_data = json.loads(suite_path.read_text(encoding="utf-8"))
     canonical_suite = json.dumps(suite_data, sort_keys=True, separators=(",", ":"))
@@ -65,18 +68,33 @@ def run_benchmark_suite(
 
     case_reports: list[dict[str, object]] = []
     asi_values: list[float] = []
+    total = len(cases)
+    completed_count = 0
+    _lock = threading.Lock()
+
+    def _evaluate_and_track(case: dict[str, object]) -> dict[str, object]:
+        nonlocal completed_count
+        result = _evaluate_case(case)
+        with _lock:
+            completed_count += 1
+            if progress_callback is not None:
+                progress_callback(completed_count, total, str(case.get("id", "")))
+        return result
 
     if workers > 1:
         ordered: dict[int, dict[str, object]] = {}
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_evaluate_case, case): i for i, case in enumerate(cases)}
+            futures = {pool.submit(_evaluate_and_track, case): i for i, case in enumerate(cases)}
             for future in as_completed(futures):
                 ordered[futures[future]] = future.result()
         case_reports = [ordered[i] for i in range(len(cases))]
     else:
-        case_reports = [_evaluate_case(case) for case in cases]
+        case_reports = [_evaluate_and_track(case) for case in cases]
 
+    domain_asi: dict[str, list[float]] = defaultdict(list)
     for entry in case_reports:
+        case_id = str(entry.get("case_id", ""))
+        domain = case_id.split("-")[0] if "-" in case_id else "general"
         report = entry["report"]
         if isinstance(report, dict):
             metrics = report.get("metrics")
@@ -84,8 +102,10 @@ def run_benchmark_suite(
                 asi = metrics.get("agent_stability_index")
                 if isinstance(asi, (int, float)):
                     asi_values.append(float(asi))
+                    domain_asi[domain].append(float(asi))
 
     mean_asi = sum(asi_values) / len(asi_values) if asi_values else 0.0
+    domain_scores = {d: round(sum(v) / len(v), 2) for d, v in sorted(domain_asi.items())}
 
     benchmark_id_seed = json.dumps(
         {
@@ -109,6 +129,7 @@ def run_benchmark_suite(
         "embedding_model": embedding_model,
         "num_cases": len(cases),
         "mean_asi": mean_asi,
+        "domain_scores": domain_scores,
         "cases": case_reports,
     }
     return BenchmarkResult(report=aggregate)

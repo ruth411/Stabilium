@@ -174,7 +174,9 @@ class MutationGenerator:
                 swapped = True
                 break
         if not swapped:
-            words = ["Could you"] + [w[0].lower() + w[1:] if i == 0 else w for i, w in enumerate(words)]
+            words = ["Could you"] + [
+                w[0].lower() + w[1:] if i == 0 else w for i, w in enumerate(words)
+            ]
         return " ".join(words)
 
     def _politeness_toggle(self, prompt: str, intensity: float) -> str:
@@ -182,7 +184,7 @@ class MutationGenerator:
         stripped = prompt
         for prefix in polite_prefixes:
             if prompt.startswith(prefix):
-                stripped = prompt[len(prefix):]
+                stripped = prompt[len(prefix) :]
                 # capitalize first word if needed
                 if stripped:
                     stripped = stripped[0].upper() + stripped[1:]
@@ -217,9 +219,15 @@ class MutationGenerator:
 
     def _passive_reframe(self, prompt: str) -> str:
         active_patterns = [
-            (r"^(Explain|Describe|Summarize|Analyze|List|Identify|Define)\s+(.+)", r"What can you tell me about \2"),
+            (
+                r"^(Explain|Describe|Summarize|Analyze|List|Identify|Define)\s+(.+)",
+                r"What can you tell me about \2",
+            ),
             (r"^(Write|Create|Draft|Produce)\s+(.+)", r"I need \2 to be written"),
-            (r"^(Fix|Resolve|Debug)\s+(.+)", r"There is an issue with \2 that needs to be addressed"),
+            (
+                r"^(Fix|Resolve|Debug)\s+(.+)",
+                r"There is an issue with \2 that needs to be addressed",
+            ),
             (r"^(Compare|Contrast)\s+(.+)", r"A comparison of \2 would be helpful"),
         ]
         for pattern, replacement in active_patterns:

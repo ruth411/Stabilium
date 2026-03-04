@@ -40,7 +40,7 @@ class AnthropicChatAdapter:
         api_key: str | None = None,
         temperature: float | None = None,
         max_tokens: int = 1024,
-        timeout_seconds: float = 60.0,
+        timeout_seconds: float = 120.0,
         max_retries: int = 4,
         min_interval_seconds: float = 0.5,
         base_backoff_seconds: float = 0.5,
@@ -146,6 +146,9 @@ class AnthropicChatAdapter:
         except error.URLError as exc:
             msg = f"Anthropic request error: {exc.reason}"
             raise RuntimeError(msg) from exc
+        except TimeoutError as exc:
+            msg = f"Anthropic request timed out after {self._timeout_seconds}s"
+            raise RuntimeError(msg) from exc
 
     def _track_usage(self, input_tokens: int, output_tokens: int) -> None:
         self._usage.requests += 1
@@ -153,9 +156,7 @@ class AnthropicChatAdapter:
         self._usage.completion_tokens += output_tokens
         self._usage.total_tokens += input_tokens + output_tokens
         in_price, out_price = _MODEL_PRICING_PER_1M.get(self._model, (0.0, 0.0))
-        cost = ((input_tokens / 1_000_000) * in_price) + (
-            (output_tokens / 1_000_000) * out_price
-        )
+        cost = ((input_tokens / 1_000_000) * in_price) + ((output_tokens / 1_000_000) * out_price)
         self._usage.estimated_cost_usd += cost
 
     def _respect_rate_limit(self) -> None:

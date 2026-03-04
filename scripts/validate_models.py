@@ -24,6 +24,7 @@ import json
 import os
 import random
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,10 +36,43 @@ from agent_stability_engine.engine.asi import ASIProfile
 from agent_stability_engine.engine.embeddings import EmbeddingProvider
 from agent_stability_engine.runners.benchmark import run_benchmark_suite
 
+# ---------------------------------------------------------------------------
+# Progress bar
+# ---------------------------------------------------------------------------
+
+
+def _make_progress_callback(model: str, total: int, start_time: float) -> object:
+    """Returns a thread-safe callback that prints a live progress bar."""
+    bar_width = 28
+
+    def callback(completed: int, _total: int, case_id: str) -> None:
+        elapsed = time.monotonic() - start_time
+        pct = completed / _total if _total else 0
+        eta_str = ""
+        if completed > 0:
+            eta_secs = int((elapsed / completed) * (_total - completed))
+            eta_str = f" | ETA ~{eta_secs // 60}m{eta_secs % 60:02d}s"
+        filled = int(bar_width * pct)
+        bar = "█" * filled + "░" * (bar_width - filled)
+        domain = case_id.split("-")[0] if "-" in case_id else case_id
+        elapsed_str = f"{int(elapsed) // 60}m{int(elapsed) % 60:02d}s"
+        line = (
+            f"\r  [{model}] {bar} {completed}/{_total}"
+            f" ({pct:.0%})  {elapsed_str}{eta_str}  [{domain}]   "
+        )
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        if completed == _total:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+    return callback
+
 
 # ---------------------------------------------------------------------------
 # Agent factories
 # ---------------------------------------------------------------------------
+
 
 def _demo_agent(prompt: str, rng: random.Random | None = None) -> str:
     """Deterministic stub — useful for free dry runs."""
@@ -63,13 +97,16 @@ def _build_agent(model_spec: str, openai_key: str | None, anthropic_key: str | N
         return _demo_agent
     model_name, temperature = _parse_model_spec(model_spec)
     if model_name.startswith("claude-"):
-        return AnthropicChatAdapter(model=model_name, api_key=anthropic_key, temperature=temperature)
+        return AnthropicChatAdapter(
+            model=model_name, api_key=anthropic_key, temperature=temperature
+        )
     return OpenAIChatAdapter(model=model_name, api_key=openai_key, temperature=temperature)
 
 
 # ---------------------------------------------------------------------------
 # Metrics extraction
 # ---------------------------------------------------------------------------
+
 
 def _extract_metrics(benchmark_report: dict[str, object]) -> dict[str, float]:
     """Pull per-metric means from all cases in a benchmark report."""
@@ -109,6 +146,7 @@ def _extract_metrics(benchmark_report: dict[str, object]) -> dict[str, float]:
 # Markdown report
 # ---------------------------------------------------------------------------
 
+
 def _generate_markdown(comparison: dict[str, object]) -> str:
     models: dict[str, dict[str, float]] = comparison["models"]  # type: ignore[assignment]
     suite = comparison["suite"]
@@ -116,7 +154,9 @@ def _generate_markdown(comparison: dict[str, object]) -> str:
     generated_at = comparison["generated_at"]
     num_cases = comparison.get("num_cases", "?")
 
-    sorted_models = sorted(models.items(), key=lambda x: x[1].get("agent_stability_index", 0), reverse=True)
+    sorted_models = sorted(
+        models.items(), key=lambda x: x[1].get("agent_stability_index", 0), reverse=True
+    )
 
     lines = [
         "# ASE Model Stability Comparison",
@@ -128,8 +168,8 @@ def _generate_markdown(comparison: dict[str, object]) -> str:
         "",
         "## Results",
         "",
-        "| Rank | Model | ASI ↓ better=higher | Variance | Contradiction | Mutation Δ | Tool Misuse |",
-        "|------|-------|---------------------|----------|---------------|------------|-------------|",
+        "| Rank | Model | ASI | Variance | Contradiction | Mutation Δ | Tool Misuse |",
+        "|------|-------|-----|----------|---------------|------------|-------------|",
     ]
 
     for rank, (model, m) in enumerate(sorted_models, 1):
@@ -138,9 +178,37 @@ def _generate_markdown(comparison: dict[str, object]) -> str:
         contra = m.get("contradiction_rate", 0)
         mut = m.get("mutation_degradation", 0)
         tool = m.get("tool_misuse_frequency", 0)
-        lines.append(
-            f"| {rank} | `{model}` | **{asi:.1f}** | {var:.4f} | {contra:.4f} | {mut:.4f} | {tool:.4f} |"
+        row = (
+            f"| {rank} | `{model}` | **{asi:.1f}**"
+            f" | {var:.4f} | {contra:.4f} | {mut:.4f} | {tool:.4f} |"
         )
+        lines.append(row)
+
+    # --- Domain breakdown ---
+    all_domains: set[str] = set()
+    for m in models.values():
+        domains = m.get("_domains", {})
+        if isinstance(domains, dict):
+            all_domains.update(domains.keys())
+
+    if all_domains:
+        sorted_domains = sorted(all_domains)
+        header_cols = " | ".join(f"`{m}`" for m, _ in sorted_models)
+        sep_cols = " | ".join("------" for _ in sorted_models)
+        lines += [
+            "",
+            "## Domain Breakdown (ASI per domain)",
+            "",
+            f"| Domain | {header_cols} |",
+            f"|--------|{sep_cols}|",
+        ]
+        for domain in sorted_domains:
+            row_vals = []
+            for _model, m in sorted_models:
+                domains = m.get("_domains", {})
+                score = domains.get(domain, None) if isinstance(domains, dict) else None
+                row_vals.append(f"**{score:.1f}**" if score is not None else "—")
+            lines.append(f"| {domain} | {' | '.join(row_vals)} |")
 
     lines += [
         "",
@@ -195,6 +263,7 @@ def _generate_markdown(comparison: dict[str, object]) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="ASE Phase 1 Validation: compare stability across LLMs"
@@ -214,14 +283,22 @@ def main() -> int:
     parser.add_argument("--run-count", type=int, default=3, help="Runs per case")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--mutation-limit", type=int, default=6, help="Max mutations per case")
-    parser.add_argument("--max-cases", type=int, default=None, help="Cap number of cases (useful for quick checks)")
-    parser.add_argument("--workers", type=int, default=4, help="Parallel workers for case evaluation (default: 4)")
-    parser.add_argument("--asi-profile", default="balanced", choices=["balanced", "safety_strict", "reasoning_focus"])
+    parser.add_argument(
+        "--max-cases", type=int, default=None, help="Cap number of cases (useful for quick checks)"
+    )
+    parser.add_argument(
+        "--workers", type=int, default=4, help="Parallel workers for case evaluation"
+    )
+    parser.add_argument(
+        "--asi-profile",
+        default="balanced",
+        choices=["balanced", "safety_strict", "reasoning_focus"],
+    )
     parser.add_argument(
         "--embedding-provider",
         default="hash",
         choices=["hash", "openai", "sentence_transformers", "auto"],
-        help="Embedding provider for semantic variance. 'hash' is free/fast but variance is not semantic.",
+        help="Embedding provider for semantic variance. 'hash' is fast but not semantic.",
     )
     parser.add_argument("--output-dir", default="out/validation")
     args = parser.parse_args()
@@ -261,6 +338,7 @@ def main() -> int:
     for model in args.models:
         print(f"\n[{model}] Starting benchmark...")
         agent_fn = _build_agent(model, openai_key, anthropic_key)
+        _start = time.monotonic()
 
         result = run_benchmark_suite(
             suite_path=suite_path,
@@ -272,6 +350,7 @@ def main() -> int:
             embedding_provider=EmbeddingProvider(args.embedding_provider),
             max_cases=args.max_cases,
             workers=args.workers,
+            progress_callback=_make_progress_callback(model, 0, _start),
         )
 
         report = result.report
@@ -283,6 +362,9 @@ def main() -> int:
         model_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
 
         metrics = _extract_metrics(report)
+        domain_scores = report.get("domain_scores", {})
+        if isinstance(domain_scores, dict):
+            metrics["_domains"] = domain_scores  # type: ignore[assignment]
         all_metrics[model] = metrics
 
         asi = metrics.get("agent_stability_index", report.get("mean_asi", 0))
@@ -313,7 +395,7 @@ def main() -> int:
     print(f"\nOutputs saved to: {output_dir}/")
     print(f"  {comparison_json.name}")
     print(f"  {comparison_md.name}")
-    print(f"  + one JSON per model")
+    print("  + one JSON per model")
 
     return 0
 
