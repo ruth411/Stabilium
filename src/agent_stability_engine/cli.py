@@ -7,6 +7,7 @@ import random
 from pathlib import Path
 from typing import Callable
 
+from agent_stability_engine.adapters.anthropic import AnthropicChatAdapter
 from agent_stability_engine.adapters.openai import OpenAIChatAdapter
 from agent_stability_engine.engine.alignment import GoalSpec
 from agent_stability_engine.engine.asi import ASIProfile
@@ -47,7 +48,7 @@ def _add_agent_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--agent-provider",
         default="demo",
-        choices=["demo", "openai"],
+        choices=["demo", "openai", "anthropic"],
         help="Agent backend provider used for generation commands",
     )
     parser.add_argument(
@@ -63,6 +64,15 @@ def _add_agent_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--openai-timeout-seconds", type=float, default=30.0)
     parser.add_argument("--openai-max-retries", type=int, default=2)
     parser.add_argument("--openai-min-interval-seconds", type=float, default=0.0)
+    parser.add_argument(
+        "--anthropic-api-key-env",
+        default="ANTHROPIC_API_KEY",
+        help="Environment variable that stores the Anthropic API key",
+    )
+    parser.add_argument("--anthropic-timeout-seconds", type=float, default=120.0)
+    parser.add_argument("--anthropic-max-retries", type=int, default=4)
+    parser.add_argument("--anthropic-min-interval-seconds", type=float, default=0.5)
+    parser.add_argument("--anthropic-max-tokens", type=int, default=1024)
 
 
 def _add_embedding_args(parser: argparse.ArgumentParser) -> None:
@@ -95,6 +105,21 @@ def _resolve_agent(args: argparse.Namespace) -> Callable[..., str]:
             timeout_seconds=args.openai_timeout_seconds,
             max_retries=args.openai_max_retries,
             min_interval_seconds=args.openai_min_interval_seconds,
+        )
+
+    if args.agent_provider == "anthropic":
+        env_name = args.anthropic_api_key_env
+        api_key = os.getenv(env_name)
+        if not api_key:
+            msg = f"missing Anthropic API key in environment variable: {env_name}"
+            raise ValueError(msg)
+        return AnthropicChatAdapter(
+            model=args.agent_model,
+            api_key=api_key,
+            max_tokens=args.anthropic_max_tokens,
+            timeout_seconds=args.anthropic_timeout_seconds,
+            max_retries=args.anthropic_max_retries,
+            min_interval_seconds=args.anthropic_min_interval_seconds,
         )
 
     msg = f"unsupported agent provider: {args.agent_provider}"

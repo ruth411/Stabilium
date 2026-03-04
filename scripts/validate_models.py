@@ -27,6 +27,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -92,7 +93,11 @@ def _parse_model_spec(spec: str) -> tuple[str, float | None]:
     return spec, None
 
 
-def _build_agent(model_spec: str, openai_key: str | None, anthropic_key: str | None) -> object:
+def _build_agent(
+    model_spec: str,
+    openai_key: str | None,
+    anthropic_key: str | None,
+) -> Callable[..., str]:
     if model_spec == "demo":
         return _demo_agent
     model_name, temperature = _parse_model_spec(model_spec)
@@ -101,6 +106,14 @@ def _build_agent(model_spec: str, openai_key: str | None, anthropic_key: str | N
             model=model_name, api_key=anthropic_key, temperature=temperature
         )
     return OpenAIChatAdapter(model=model_name, api_key=openai_key, temperature=temperature)
+
+
+def _build_agent_factory(
+    model_spec: str,
+    openai_key: str | None,
+    anthropic_key: str | None,
+) -> Callable[[], Callable[..., str]]:
+    return lambda: _build_agent(model_spec, openai_key, anthropic_key)
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +350,8 @@ def main() -> int:
 
     for model in args.models:
         print(f"\n[{model}] Starting benchmark...")
-        agent_fn = _build_agent(model, openai_key, anthropic_key)
+        agent_factory = _build_agent_factory(model, openai_key, anthropic_key)
+        agent_fn = agent_factory()
         _start = time.monotonic()
 
         result = run_benchmark_suite(
@@ -351,6 +365,7 @@ def main() -> int:
             max_cases=args.max_cases,
             workers=args.workers,
             progress_callback=_make_progress_callback(model, 0, _start),
+            agent_factory=agent_factory if args.workers > 1 else None,
         )
 
         report = result.report

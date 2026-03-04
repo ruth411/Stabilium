@@ -311,3 +311,43 @@ def test_cli_evaluate_uses_resolved_agent(tmp_path: Path, monkeypatch: object) -
     assert used_provider == ["openai"]
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["schema_version"] == "0.1.0"
+
+
+def test_cli_evaluate_accepts_anthropic_provider(tmp_path: Path, monkeypatch: object) -> None:
+    output = tmp_path / "eval-anthropic-route.json"
+    used_provider: list[str] = []
+
+    def fake_resolve(args: object) -> object:
+        used_provider.append(str(args.agent_provider))
+
+        def fake_agent(prompt: str, _rng: object) -> str:
+            return f"fake::{prompt}"
+
+        return fake_agent
+
+    monkeypatch.setattr("agent_stability_engine.cli._resolve_agent", fake_resolve)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ase",
+            "evaluate",
+            "--agent-provider",
+            "anthropic",
+            "--agent-model",
+            "claude-haiku-4-5",
+            "--prompt",
+            "hello",
+            "--run-count",
+            "2",
+            "--seed",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    exit_code = main()
+    assert exit_code == 0
+    assert used_provider == ["anthropic"]
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "0.1.0"

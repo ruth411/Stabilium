@@ -19,9 +19,11 @@ python -m mypy src
 
 ```bash
 export OPENAI_API_KEY="..."
+export ANTHROPIC_API_KEY="..."
 
 python -m agent_stability_engine.cli evaluate --prompt "Explain checksums" --run-count 5 --seed 42 --asi-profile reasoning_focus --mutation-limit 6 --output out/eval.json --manifest-output out/eval.manifest.json
 python -m agent_stability_engine.cli evaluate --agent-provider openai --agent-model gpt-4o-mini --prompt "Explain checksums" --run-count 3 --seed 42 --output out/eval-openai.json
+python -m agent_stability_engine.cli evaluate --agent-provider anthropic --agent-model claude-haiku-4-5 --prompt "Explain checksums" --run-count 3 --seed 42 --output out/eval-anthropic.json
 python -m agent_stability_engine.cli benchmark --suite examples/benchmarks/default_suite.json --run-count 5 --seed 42 --asi-profile safety_strict --mutation-limit 6 --output out/bench.json --manifest-output out/bench.manifest.json
 python -m agent_stability_engine.cli regress --suite examples/benchmarks/reasoning_suite.json --baseline examples/baselines/reasoning_suite.baseline.json --run-count 3 --seed 42 --output out/regress-reasoning.json
 python -m agent_stability_engine.cli drift --current-report out/eval.json --baseline-report out/baseline_eval.json --output out/drift.json

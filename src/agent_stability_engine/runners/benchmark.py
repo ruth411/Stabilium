@@ -33,6 +33,7 @@ def run_benchmark_suite(
     max_cases: int | None = None,
     workers: int = 1,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    agent_factory: Callable[[], Callable[..., str]] | None = None,
 ) -> BenchmarkResult:
     suite_data = json.loads(suite_path.read_text(encoding="utf-8"))
     canonical_suite = json.dumps(suite_data, sort_keys=True, separators=(",", ":"))
@@ -41,20 +42,39 @@ def run_benchmark_suite(
     if max_cases is not None and max_cases > 0:
         cases = cases[:max_cases]
 
-    evaluator = StabilityEvaluator(
-        asi_profile=asi_profile,
-        mutation_sample_limit=mutation_sample_limit,
-        embedding_provider=embedding_provider,
-        embedding_model=embedding_model,
-        embedding_openai_api_key=embedding_openai_api_key,
-    )
+    def _make_evaluator() -> StabilityEvaluator:
+        return StabilityEvaluator(
+            asi_profile=asi_profile,
+            mutation_sample_limit=mutation_sample_limit,
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
+            embedding_openai_api_key=embedding_openai_api_key,
+        )
+
+    shared_agent_lock = threading.Lock()
+    shared_agent_fn = agent_fn
+
+    def _locked_agent(prompt: str, rng: object) -> str:
+        with shared_agent_lock:
+            return _invoke_agent(shared_agent_fn, prompt, rng)
+
+    def _make_case_agent() -> Callable[..., str]:
+        if agent_factory is not None:
+            return agent_factory()
+        if workers > 1:
+            # Avoid concurrent access to mutable adapters when one shared agent
+            # instance is used with multi-worker benchmarking.
+            return _locked_agent
+        return shared_agent_fn
 
     def _evaluate_case(case: dict[str, object]) -> dict[str, object]:
         case_prompt = str(case["prompt"])
         case_id = str(case["id"])
+        evaluator = _make_evaluator()
+        case_agent_fn = _make_case_agent()
         evaluation = evaluator.evaluate(
             prompt=case_prompt,
-            agent_fn=agent_fn,
+            agent_fn=case_agent_fn,
             run_count=run_count,
             seed=seed,
             timestamp_utc=timestamp_utc,
@@ -133,3 +153,10 @@ def run_benchmark_suite(
         "cases": case_reports,
     }
     return BenchmarkResult(report=aggregate)
+
+
+def _invoke_agent(fn: Callable[..., str], prompt: str, rng: object) -> str:
+    try:
+        return fn(prompt, rng)
+    except TypeError:
+        return fn(prompt)
