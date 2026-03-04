@@ -38,3 +38,20 @@ def test_report_schema_rejects_invalid_payload() -> None:
 
     with pytest.raises(ValidationError):
         validate_report(report)
+
+
+def test_report_schema_accepts_asi_confidence_block() -> None:
+    report = _valid_report()
+    metrics = report["metrics"]
+    assert isinstance(metrics, dict)
+    metrics["agent_stability_index_confidence"] = {
+        "sample_size": 12,
+        "mean": 83.9,
+        "std_dev": 4.1,
+        "std_error": 1.1832159566,
+        "confidence_level": 0.95,
+        "ci_low": 81.58,
+        "ci_high": 86.22,
+        "method": "normal_approx",
+    }
+    validate_report(report)

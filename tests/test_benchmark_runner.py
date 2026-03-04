@@ -29,6 +29,14 @@ def test_benchmark_runner_executes_all_cases() -> None:
     assert report["mutation_limit"] is None
     assert report["num_cases"] == 3
     assert "mean_asi" in report
+    assert "asi_statistics" in report
+    asi_stats = report["asi_statistics"]
+    assert isinstance(asi_stats, dict)
+    assert asi_stats["sample_size"] == 3
+    assert asi_stats["ci_low"] <= report["mean_asi"] <= asi_stats["ci_high"]
+    case_asi_values = report["case_asi_values"]
+    assert isinstance(case_asi_values, list)
+    assert len(case_asi_values) == 3
 
     cases = report["cases"]
     assert isinstance(cases, list)

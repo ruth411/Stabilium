@@ -35,6 +35,7 @@ from agent_stability_engine.adapters.anthropic import AnthropicChatAdapter
 from agent_stability_engine.adapters.openai import OpenAIChatAdapter
 from agent_stability_engine.engine.asi import ASIProfile
 from agent_stability_engine.engine.embeddings import EmbeddingProvider
+from agent_stability_engine.engine.stats import compare_sample_means
 from agent_stability_engine.runners.benchmark import run_benchmark_suite
 
 # ---------------------------------------------------------------------------
@@ -155,20 +156,78 @@ def _extract_metrics(benchmark_report: dict[str, object]) -> dict[str, float]:
     return {k: round(v / count, 4) for k, v in sums.items()}
 
 
+def _extract_case_asi_values(benchmark_report: dict[str, object]) -> list[float]:
+    raw_values = benchmark_report.get("case_asi_values")
+    if not isinstance(raw_values, list):
+        return []
+    values: list[float] = []
+    for item in raw_values:
+        if isinstance(item, (int, float)):
+            values.append(float(item))
+    return values
+
+
+def _pairwise_significance(
+    model_case_asi: dict[str, list[float]],
+    alpha: float = 0.05,
+    confidence_level: float = 0.95,
+) -> list[dict[str, object]]:
+    models = sorted(model_case_asi.keys())
+    comparisons: list[dict[str, object]] = []
+    for left_idx in range(len(models)):
+        for right_idx in range(left_idx + 1, len(models)):
+            left_model = models[left_idx]
+            right_model = models[right_idx]
+            left_values = model_case_asi[left_model]
+            right_values = model_case_asi[right_model]
+            if not left_values or not right_values:
+                continue
+
+            result = compare_sample_means(
+                left_values,
+                right_values,
+                alpha=alpha,
+                confidence_level=confidence_level,
+            )
+            comparisons.append(
+                {
+                    "left_model": left_model,
+                    "right_model": right_model,
+                    "delta_mean": result["delta_mean"],
+                    "delta_ci_low": result["delta_ci_low"],
+                    "delta_ci_high": result["delta_ci_high"],
+                    "p_value": result["p_value"],
+                    "significant_difference": result["significant_difference"],
+                    "better_model": (
+                        left_model
+                        if result["better_sample"] == "left"
+                        else right_model if result["better_sample"] == "right" else "tie"
+                    ),
+                    "alpha": alpha,
+                    "confidence_level": confidence_level,
+                    "method": result["method"],
+                }
+            )
+    return comparisons
+
+
 # ---------------------------------------------------------------------------
 # Markdown report
 # ---------------------------------------------------------------------------
 
 
 def _generate_markdown(comparison: dict[str, object]) -> str:
-    models: dict[str, dict[str, float]] = comparison["models"]  # type: ignore[assignment]
-    suite = comparison["suite"]
-    run_count = comparison["run_count"]
-    generated_at = comparison["generated_at"]
+    raw_models = comparison.get("models")
+    models: dict[str, dict[str, object]] = raw_models if isinstance(raw_models, dict) else {}
+    suite = comparison.get("suite")
+    run_count = comparison.get("run_count")
+    generated_at = comparison.get("generated_at")
     num_cases = comparison.get("num_cases", "?")
 
     sorted_models = sorted(
-        models.items(), key=lambda x: x[1].get("agent_stability_index", 0), reverse=True
+        models.items(),
+        key=lambda x: float(x[1].get("agent_stability_index", 0.0)),
+        reverse=True,
     )
 
     lines = [
@@ -181,19 +240,24 @@ def _generate_markdown(comparison: dict[str, object]) -> str:
         "",
         "## Results",
         "",
-        "| Rank | Model | ASI | Variance | Contradiction | Mutation Δ | Tool Misuse |",
-        "|------|-------|-----|----------|---------------|------------|-------------|",
+        "| Rank | Model | ASI | ASI 95% CI | Variance | Contradiction | Mutation Δ | Tool Misuse |",
+        "|------|-------|-----|------------|----------|---------------|------------|-------------|",
     ]
 
     for rank, (model, m) in enumerate(sorted_models, 1):
-        asi = m.get("agent_stability_index", 0)
-        var = m.get("semantic_variance", 0)
-        contra = m.get("contradiction_rate", 0)
-        mut = m.get("mutation_degradation", 0)
-        tool = m.get("tool_misuse_frequency", 0)
+        asi = float(m.get("agent_stability_index", 0.0))
+        var = float(m.get("semantic_variance", 0.0))
+        contra = float(m.get("contradiction_rate", 0.0))
+        mut = float(m.get("mutation_degradation", 0.0))
+        tool = float(m.get("tool_misuse_frequency", 0.0))
+        ci_low_obj = m.get("asi_ci95_low")
+        ci_high_obj = m.get("asi_ci95_high")
+        ci_low = float(ci_low_obj) if isinstance(ci_low_obj, (int, float)) else None
+        ci_high = float(ci_high_obj) if isinstance(ci_high_obj, (int, float)) else None
+        ci_text = "—" if ci_low is None or ci_high is None else f"[{ci_low:.1f}, {ci_high:.1f}]"
         row = (
             f"| {rank} | `{model}` | **{asi:.1f}**"
-            f" | {var:.4f} | {contra:.4f} | {mut:.4f} | {tool:.4f} |"
+            f" | {ci_text} | {var:.4f} | {contra:.4f} | {mut:.4f} | {tool:.4f} |"
         )
         lines.append(row)
 
@@ -223,6 +287,33 @@ def _generate_markdown(comparison: dict[str, object]) -> str:
                 row_vals.append(f"**{score:.1f}**" if score is not None else "—")
             lines.append(f"| {domain} | {' | '.join(row_vals)} |")
 
+    raw_pairwise = comparison.get("pairwise_significance")
+    pairwise = raw_pairwise if isinstance(raw_pairwise, list) else []
+    if pairwise:
+        lines += [
+            "",
+            "## Model-Swap Significance",
+            "",
+            "| Comparison | Δ Mean ASI | 95% CI (Δ) | p-value | Significant | Better |",
+            "|------------|------------|------------|---------|-------------|--------|",
+        ]
+        for row in pairwise:
+            if not isinstance(row, dict):
+                continue
+            left_model = str(row.get("left_model", "left"))
+            right_model = str(row.get("right_model", "right"))
+            delta = float(row.get("delta_mean", 0.0))
+            ci_low = float(row.get("delta_ci_low", 0.0))
+            ci_high = float(row.get("delta_ci_high", 0.0))
+            p_value = float(row.get("p_value", 1.0))
+            significant = bool(row.get("significant_difference", False))
+            better = str(row.get("better_model", "tie"))
+            lines.append(
+                f"| `{left_model}` vs `{right_model}` | {delta:.2f} | "
+                f"[{ci_low:.2f}, {ci_high:.2f}] | {p_value:.4f} | "
+                f"{'yes' if significant else 'no'} | `{better}` |"
+            )
+
     lines += [
         "",
         "## Metric Definitions",
@@ -242,8 +333,8 @@ def _generate_markdown(comparison: dict[str, object]) -> str:
     if sorted_models:
         best_model, best_m = sorted_models[0]
         worst_model, worst_m = sorted_models[-1]
-        best_asi = best_m.get("agent_stability_index", 0)
-        worst_asi = worst_m.get("agent_stability_index", 0)
+        best_asi = float(best_m.get("agent_stability_index", 0.0))
+        worst_asi = float(worst_m.get("agent_stability_index", 0.0))
 
         lines.append(f"- **Most stable:** `{best_model}` with ASI {best_asi:.1f}")
         if len(sorted_models) > 1:
@@ -252,13 +343,17 @@ def _generate_markdown(comparison: dict[str, object]) -> str:
             lines.append(f"- **Stability gap:** {gap:.1f} ASI points between best and worst")
 
         # Flag any model with high contradiction
-        high_contra = [(m, d) for m, d in sorted_models if d.get("contradiction_rate", 0) > 0.15]
+        high_contra = [
+            (m, d) for m, d in sorted_models if float(d.get("contradiction_rate", 0.0)) > 0.15
+        ]
         if high_contra:
             names = ", ".join(f"`{m}`" for m, _ in high_contra)
             lines.append(f"- **High contradiction warning:** {names} (rate > 0.15)")
 
         # Flag mutation sensitivity
-        high_mut = [(m, d) for m, d in sorted_models if d.get("mutation_degradation", 0) > 0.3]
+        high_mut = [
+            (m, d) for m, d in sorted_models if float(d.get("mutation_degradation", 0.0)) > 0.3
+        ]
         if high_mut:
             names = ", ".join(f"`{m}`" for m, _ in high_mut)
             lines.append(f"- **Mutation-sensitive:** {names} (degradation > 0.30)")
@@ -345,7 +440,8 @@ def main() -> int:
     print(f"  Embeddings: {args.embedding_provider}")
     print("=" * 60)
 
-    all_metrics: dict[str, dict[str, float]] = {}
+    all_metrics: dict[str, dict[str, object]] = {}
+    all_case_asi: dict[str, list[float]] = {}
     num_cases = 0
 
     for model in args.models:
@@ -377,13 +473,28 @@ def main() -> int:
         model_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
 
         metrics = _extract_metrics(report)
+        asi_statistics = report.get("asi_statistics")
+        if isinstance(asi_statistics, dict):
+            ci_low = asi_statistics.get("ci_low")
+            ci_high = asi_statistics.get("ci_high")
+            sample_size = asi_statistics.get("sample_size")
+            if isinstance(ci_low, (int, float)):
+                metrics["asi_ci95_low"] = float(ci_low)
+            if isinstance(ci_high, (int, float)):
+                metrics["asi_ci95_high"] = float(ci_high)
+            if isinstance(sample_size, int):
+                metrics["sample_size"] = sample_size
         domain_scores = report.get("domain_scores", {})
         if isinstance(domain_scores, dict):
-            metrics["_domains"] = domain_scores  # type: ignore[assignment]
+            metrics["_domains"] = domain_scores
+        all_case_asi[model] = _extract_case_asi_values(report)
         all_metrics[model] = metrics
 
         asi = metrics.get("agent_stability_index", report.get("mean_asi", 0))
-        print(f"[{model}] ASI = {asi:.1f}  |  cases={num_cases}  →  saved {model_path.name}")
+        asi_float = float(asi) if isinstance(asi, (int, float)) else 0.0
+        print(f"[{model}] ASI = {asi_float:.1f}  |  cases={num_cases}  →  saved {model_path.name}")
+
+    pairwise_significance = _pairwise_significance(all_case_asi)
 
     # Build comparison
     comparison: dict[str, object] = {
@@ -395,6 +506,7 @@ def main() -> int:
         "mutation_limit": args.mutation_limit,
         "num_cases": num_cases,
         "models": all_metrics,
+        "pairwise_significance": pairwise_significance,
     }
 
     comparison_json = output_dir / "model_comparison.json"

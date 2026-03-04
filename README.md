@@ -32,6 +32,10 @@ python -m agent_stability_engine.cli heal --prompt "Provide triage steps" --run-
 python -m agent_stability_engine.cli demo --output-dir out/demo --run-count 3 --seed 42 --horizon 4 --manifest-output out/demo.manifest.json
 ```
 
+Benchmark and regression outputs now include:
+- `asi_statistics` (`sample_size`, `mean`, `std_dev`, `std_error`, `ci_low`, `ci_high`)
+- `threshold_significance` in regression reports (`p_value`, `significant_pass`)
+
 ## GitHub Action (Regression Gate)
 
 Use the bundled action to gate PRs on benchmark ASI regressions.

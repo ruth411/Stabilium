@@ -12,6 +12,7 @@ from typing import Callable
 from agent_stability_engine.engine.asi import ASIProfile
 from agent_stability_engine.engine.embeddings import EmbeddingProvider
 from agent_stability_engine.engine.evaluator import StabilityEvaluator
+from agent_stability_engine.engine.stats import summarize_mean_confidence
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,7 @@ def run_benchmark_suite(
                     domain_asi[domain].append(float(asi))
 
     mean_asi = sum(asi_values) / len(asi_values) if asi_values else 0.0
+    asi_statistics = summarize_mean_confidence(asi_values).to_dict() if asi_values else None
     domain_scores = {d: round(sum(v) / len(v), 2) for d, v in sorted(domain_asi.items())}
 
     benchmark_id_seed = json.dumps(
@@ -149,6 +151,8 @@ def run_benchmark_suite(
         "embedding_model": embedding_model,
         "num_cases": len(cases),
         "mean_asi": mean_asi,
+        "asi_statistics": asi_statistics,
+        "case_asi_values": asi_values,
         "domain_scores": domain_scores,
         "cases": case_reports,
     }
