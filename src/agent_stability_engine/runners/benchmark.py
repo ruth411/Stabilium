@@ -71,6 +71,8 @@ def run_benchmark_suite(
     def _evaluate_case(case: dict[str, object]) -> dict[str, object]:
         case_prompt = str(case["prompt"])
         case_id = str(case["id"])
+        case_expected = case.get("expected")
+        expected_str = str(case_expected) if case_expected is not None else None
         evaluator = _make_evaluator()
         case_agent_fn = _make_case_agent()
         evaluation = evaluator.evaluate(
@@ -79,6 +81,7 @@ def run_benchmark_suite(
             run_count=run_count,
             seed=seed,
             timestamp_utc=timestamp_utc,
+            expected=expected_str,
         )
         report = evaluation.report
         return {

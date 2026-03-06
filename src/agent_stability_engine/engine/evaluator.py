@@ -12,6 +12,7 @@ from agent_stability_engine.arbitration.arbitrator import ArbitrationResult, Cro
 from agent_stability_engine.engine.alignment import GoalAlignmentDetector, GoalSpec
 from agent_stability_engine.engine.asi import ASICalculator, ASIProfile
 from agent_stability_engine.engine.contradiction import ContradictionDetector
+from agent_stability_engine.engine.correctness import CorrectnessScorer
 from agent_stability_engine.engine.drift import DriftAnalysis, DriftTracker, metrics_from_report
 from agent_stability_engine.engine.embeddings import EmbeddingProvider
 from agent_stability_engine.engine.sampling import MultiRunSampler
@@ -51,6 +52,11 @@ class StabilityEvaluator:
             embedding_model=embedding_model,
             embedding_openai_api_key=embedding_openai_api_key,
         )
+        self._correctness = CorrectnessScorer(
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
+            embedding_openai_api_key=embedding_openai_api_key,
+        )
         self._contradiction = ContradictionDetector()
         self._arbitrator = CrossModelArbitrator()
         self._alignment = GoalAlignmentDetector()
@@ -58,6 +64,7 @@ class StabilityEvaluator:
         self._mutator = MutationGenerator(seed=0)
         self._taxonomy = FailureTaxonomy()
         self._asi = ASICalculator.from_profile(asi_profile)
+        self._asi_with_correctness = ASICalculator.from_profile_with_correctness(asi_profile)
         self._asi_profile = asi_profile
         self._mutation_intensity_levels = mutation_intensity_levels
         self._mutation_sample_limit = mutation_sample_limit
@@ -72,6 +79,7 @@ class StabilityEvaluator:
         timestamp_utc: str | None = None,
         goal_spec: GoalSpec | None = None,
         baseline_reports: list[dict[str, object]] | None = None,
+        expected: str | None = None,
     ) -> StabilityEvaluation:
         sampler = MultiRunSampler[str, str](seed=seed)
         sampled = sampler.run(
@@ -98,12 +106,19 @@ class StabilityEvaluator:
         alignment = self._alignment.evaluate(outputs, goal_spec) if goal_spec is not None else None
         goal_misalignment_rate = alignment.misalignment_rate if alignment is not None else 0.0
 
-        asi = self._asi.calculate(
+        incorrectness_rate: float | None = None
+        if expected is not None:
+            mean_output = outputs[0] if outputs else ""
+            incorrectness_rate = self._correctness.score(mean_output, expected)
+
+        calculator = self._asi_with_correctness if incorrectness_rate is not None else self._asi
+        asi = calculator.calculate(
             semantic_variance=variance,
             contradiction_rate=contradiction_rate,
             mutation_degradation=mutation_degradation,
             cross_model_disagreement=disagreement,
             tool_misuse_frequency=tool_misuse,
+            incorrectness_rate=incorrectness_rate,
         )
         current_metrics_vector = {
             "semantic_variance": variance,
@@ -195,6 +210,7 @@ class StabilityEvaluator:
                 "mutation_degradation": mutation_degradation,
                 "cross_model_disagreement": disagreement,
                 "tool_misuse_frequency": tool_misuse,
+                "incorrectness_rate": incorrectness_rate,
                 "goal_misalignment_rate": goal_misalignment_rate,
                 "behavior_drift_score": drift_score,
                 "agent_stability_index": asi,

@@ -45,6 +45,7 @@ REPORT_SCHEMA: dict[str, Any] = {
                 "mutation_degradation": {"type": "number", "minimum": 0, "maximum": 1},
                 "cross_model_disagreement": {"type": "number", "minimum": 0, "maximum": 1},
                 "tool_misuse_frequency": {"type": "number", "minimum": 0, "maximum": 1},
+                "incorrectness_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
                 "goal_misalignment_rate": {"type": "number", "minimum": 0, "maximum": 1},
                 "behavior_drift_score": {"type": "number", "minimum": 0, "maximum": 1},
                 "long_horizon_instability": {"type": "number", "minimum": 0, "maximum": 1},
