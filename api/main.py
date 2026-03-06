@@ -29,8 +29,9 @@ app.add_middleware(
 
 # ─── Request / Response models ────────────────────────────────────────────────
 
+
 class EvaluateRequest(BaseModel):
-    provider: str       # "openai" | "anthropic"
+    provider: str  # "openai" | "anthropic"
     model: str
     api_key: str
     run_count: int = 3
@@ -47,6 +48,7 @@ class EvaluateResponse(BaseModel):
 
 
 # ─── Routes ──────────────────────────────────────────────────────────────────
+
 
 @app.get("/health")
 def health() -> dict[str, str]:
