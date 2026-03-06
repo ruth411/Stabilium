@@ -1,0 +1,7 @@
+# Install the core engine
+-e .
+
+# API server dependencies
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.7
