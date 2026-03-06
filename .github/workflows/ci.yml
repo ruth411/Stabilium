@@ -25,7 +25,9 @@ jobs:
         run: python -m ruff check .
 
       - name: Black
-        run: python -m black --check --config pyproject.toml .
+        run: |
+          python -m black --version
+          python -m black --check --line-length 100 --target-version py39 .
 
       - name: Mypy
         run: python -m mypy src
