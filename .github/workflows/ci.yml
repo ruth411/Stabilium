@@ -25,7 +25,7 @@ jobs:
         run: python -m ruff check .
 
       - name: Black
-        run: python -m black --check .
+        run: python -m black --check --config pyproject.toml .
 
       - name: Mypy
         run: python -m mypy src
