@@ -11,7 +11,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from agent_stability_engine.adapters import AnthropicChatAdapter, OpenAIChatAdapter
-from agent_stability_engine.engine.asi import ASIProfile
 from agent_stability_engine.engine.embeddings import EmbeddingProvider
 from agent_stability_engine.runners.benchmark import run_benchmark_suite
 
@@ -70,7 +69,10 @@ def evaluate(req: EvaluateRequest) -> EvaluateResponse:
     elif req.provider == "anthropic":
         agent = AnthropicChatAdapter(model=req.model, api_key=req.api_key)
     else:
-        raise HTTPException(status_code=400, detail=f"Unknown provider: {req.provider!r}. Use 'openai' or 'anthropic'.")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown provider: {req.provider!r}. Use 'openai' or 'anthropic'.",
+        )
 
     if not SUITE_PATH.exists():
         raise HTTPException(status_code=500, detail="Benchmark suite not found on server.")
