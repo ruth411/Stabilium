@@ -10,7 +10,7 @@ import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 # Make sure the engine is importable
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -264,7 +264,7 @@ def _create_session(conn: sqlite3.Connection, user_id: str) -> str:
 
 
 def _require_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_auth_scheme),
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_auth_scheme)],
 ) -> UserPublic:
     if credentials is None or not credentials.credentials:
         raise HTTPException(
@@ -428,7 +428,9 @@ def register(req: RegisterRequest) -> AuthResponse:
         try:
             conn.execute(
                 """
-                INSERT INTO users (id, business_name, email, password_salt, password_hash, created_at)
+                INSERT INTO users (
+                    id, business_name, email, password_salt, password_hash, created_at
+                )
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (user_id, req.business_name.strip(), email, salt, password_hash, now),
@@ -472,14 +474,14 @@ def login(req: LoginRequest) -> AuthResponse:
 
 
 @app.get("/auth/me", response_model=UserPublic)
-def auth_me(user: UserPublic = Depends(_require_user)) -> UserPublic:
+def auth_me(user: Annotated[UserPublic, Depends(_require_user)]) -> UserPublic:
     return user
 
 
 @app.post("/auth/logout")
 def logout(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_auth_scheme),
-    _: UserPublic = Depends(_require_user),
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_auth_scheme)],
+    _: Annotated[UserPublic, Depends(_require_user)],
 ) -> dict[str, bool]:
     if credentials is not None and credentials.credentials:
         with _connect_db() as conn:
@@ -489,7 +491,10 @@ def logout(
 
 
 @app.post("/jobs", response_model=JobSummary, status_code=202)
-def create_job(req: JobCreateRequest, user: UserPublic = Depends(_require_user)) -> JobSummary:
+def create_job(
+    req: JobCreateRequest,
+    user: Annotated[UserPublic, Depends(_require_user)],
+) -> JobSummary:
     if not SUITE_PATH.exists():
         raise HTTPException(status_code=500, detail="benchmark suite missing on server")
     api_key = req.api_key.strip()
@@ -541,7 +546,7 @@ def create_job(req: JobCreateRequest, user: UserPublic = Depends(_require_user))
 
 
 @app.get("/jobs", response_model=JobListResponse)
-def list_jobs(user: UserPublic = Depends(_require_user)) -> JobListResponse:
+def list_jobs(user: Annotated[UserPublic, Depends(_require_user)]) -> JobListResponse:
     with _connect_db() as conn:
         rows = conn.execute(
             """
@@ -557,7 +562,10 @@ def list_jobs(user: UserPublic = Depends(_require_user)) -> JobListResponse:
 
 
 @app.get("/jobs/{job_id}", response_model=JobSummary)
-def get_job(job_id: str, user: UserPublic = Depends(_require_user)) -> JobSummary:
+def get_job(
+    job_id: str,
+    user: Annotated[UserPublic, Depends(_require_user)],
+) -> JobSummary:
     with _connect_db() as conn:
         row = conn.execute(
             "SELECT * FROM jobs WHERE id = ? AND user_id = ?",
@@ -569,7 +577,10 @@ def get_job(job_id: str, user: UserPublic = Depends(_require_user)) -> JobSummar
 
 
 @app.get("/jobs/{job_id}/report", response_model=JobReportResponse)
-def get_job_report(job_id: str, user: UserPublic = Depends(_require_user)) -> JobReportResponse:
+def get_job_report(
+    job_id: str,
+    user: Annotated[UserPublic, Depends(_require_user)],
+) -> JobReportResponse:
     with _connect_db() as conn:
         row = conn.execute(
             "SELECT status, result_json FROM jobs WHERE id = ? AND user_id = ?",
