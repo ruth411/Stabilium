@@ -8,6 +8,7 @@ import os
 import secrets
 import sys
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -122,6 +123,12 @@ class _DBWrapper:
 
 
 def _connect_db() -> _DBWrapper:
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL is not set. "
+            "Add a PostgreSQL database plugin to your Railway project — "
+            "Railway will then set DATABASE_URL automatically."
+        )
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
     return _DBWrapper(conn)
 
@@ -717,9 +724,13 @@ def _allowed_origins() -> list[str]:
     return [part for part in parts if part]
 
 
-_init_db()
+@asynccontextmanager
+async def _lifespan(app: FastAPI):  # noqa: ARG001
+    _init_db()
+    yield
 
-app = FastAPI(title="Stabilium API", version="0.2.0")
+
+app = FastAPI(title="Stabilium API", version="0.2.0", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
