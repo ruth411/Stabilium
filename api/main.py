@@ -138,10 +138,17 @@ def _init_db() -> None:
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
+        # Migration: add name column to users table
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 class UserPublic(BaseModel):
     id: str
+    name: str
     business_name: str
     email: str
     created_at: str
@@ -153,6 +160,7 @@ class AuthResponse(BaseModel):
 
 
 class RegisterRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
     business_name: str = Field(min_length=1, max_length=200)
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=8, max_length=128)
@@ -222,6 +230,7 @@ class EvaluateResponse(BaseModel):
 def _row_to_user(row: sqlite3.Row) -> UserPublic:
     return UserPublic(
         id=str(row["id"]),
+        name=str(row["name"]) if row["name"] else "",
         business_name=str(row["business_name"]),
         email=str(row["email"]),
         created_at=str(row["created_at"]),
@@ -299,7 +308,7 @@ def _require_user(
     with _connect_db() as conn:
         row = conn.execute(
             """
-            SELECT s.expires_at, u.id, u.business_name, u.email, u.created_at
+            SELECT s.expires_at, u.id, u.name, u.business_name, u.email, u.created_at
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token = ?
@@ -705,11 +714,19 @@ def register(req: RegisterRequest) -> AuthResponse:
             conn.execute(
                 """
                 INSERT INTO users (
-                    id, business_name, email, password_salt, password_hash, created_at
+                    id, name, business_name, email, password_salt, password_hash, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, req.business_name.strip(), email, salt, password_hash, now),
+                (
+                    user_id,
+                    req.name.strip(),
+                    req.business_name.strip(),
+                    email,
+                    salt,
+                    password_hash,
+                    now,
+                ),
             )
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="email already registered") from exc
@@ -717,7 +734,7 @@ def register(req: RegisterRequest) -> AuthResponse:
         token = _create_session(conn, user_id)
         conn.commit()
         row = conn.execute(
-            "SELECT id, business_name, email, created_at FROM users WHERE id = ?",
+            "SELECT id, name, business_name, email, created_at FROM users WHERE id = ?",
             (user_id,),
         ).fetchone()
 
@@ -733,7 +750,7 @@ def login(req: LoginRequest) -> AuthResponse:
     with _connect_db() as conn:
         row = conn.execute(
             """
-            SELECT id, business_name, email, created_at, password_salt, password_hash
+            SELECT id, name, business_name, email, created_at, password_salt, password_hash
             FROM users
             WHERE email = ?
             """,
