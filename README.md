@@ -1,19 +1,37 @@
 # Agent Stability Engine (ASE)
 
-Week 1-12 implementation for ASE core metrics, mutation stress testing, arbitration, contradiction analysis, taxonomy severity scoring, drift tracking, long-horizon stability, self-healing remediation, benchmark runner, regression gating, release/demo packaging, and CLI.
+A rigorous benchmarking and stability testing framework for AI agents. ASE measures how consistently an agent responds across semantic mutations, prompt variations, and adversarial perturbations — producing a single **Agent Stability Index (ASI)** score per model.
 
-## Quickstart
+Live platform: [stabilium.ruthwikdovala.com](https://stabilium.ruthwikdovala.com)
+
+---
+
+## What's inside
+
+| Path | Purpose |
+|---|---|
+| `src/agent_stability_engine/` | Core engine (evaluator, mutations, embeddings, stats) |
+| `api/main.py` | FastAPI REST API (auth, jobs, benchmark runner) |
+| `examples/benchmarks/` | Benchmark suites (100-case `large_suite.json`) |
+| `examples/baselines/` | Baseline results for regression gating |
+| `scripts/validate_models.py` | CLI script to compare models head-to-head |
+
+---
+
+## Quickstart (engine)
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .[dev]
+pip install --upgrade pip
+pip install -e .[dev]
 python -m pytest
 python -m ruff check .
 python -m black --check .
 python -m mypy src
 ```
+
+---
 
 ## CLI
 
@@ -21,33 +39,142 @@ python -m mypy src
 export OPENAI_API_KEY="..."
 export ANTHROPIC_API_KEY="..."
 
-python -m agent_stability_engine.cli evaluate --prompt "Explain checksums" --run-count 5 --seed 42 --asi-profile reasoning_focus --mutation-limit 6 --output out/eval.json --manifest-output out/eval.manifest.json
-python -m agent_stability_engine.cli evaluate --agent-provider openai --agent-model gpt-4o-mini --prompt "Explain checksums" --run-count 3 --seed 42 --output out/eval-openai.json
-python -m agent_stability_engine.cli evaluate --agent-provider anthropic --agent-model claude-haiku-4-5 --prompt "Explain checksums" --run-count 3 --seed 42 --output out/eval-anthropic.json
-python -m agent_stability_engine.cli benchmark --suite examples/benchmarks/default_suite.json --run-count 5 --seed 42 --asi-profile safety_strict --mutation-limit 6 --output out/bench.json --manifest-output out/bench.manifest.json
-python -m agent_stability_engine.cli regress --suite examples/benchmarks/reasoning_suite.json --baseline examples/baselines/reasoning_suite.baseline.json --run-count 3 --seed 42 --output out/regress-reasoning.json
-python -m agent_stability_engine.cli drift --current-report out/eval.json --baseline-report out/baseline_eval.json --output out/drift.json
-python -m agent_stability_engine.cli horizon --prompt "Plan migration strategy" --horizon 6 --run-count 5 --seed 42 --output out/horizon.json
-python -m agent_stability_engine.cli heal --prompt "Provide triage steps" --run-count 5 --seed 42 --max-attempts 2 --output out/heal.json --manifest-output out/heal.manifest.json
-python -m agent_stability_engine.cli demo --output-dir out/demo --run-count 3 --seed 42 --horizon 4 --manifest-output out/demo.manifest.json
-python -m agent_stability_engine.cli export --input-report out/bench.json --history-report out/bench_prev.json --bundle-output out/compliance.bundle.json --pdf-output out/compliance.pdf
+# Single prompt evaluation
+python -m agent_stability_engine.cli evaluate \
+  --prompt "Explain checksums" \
+  --run-count 5 --seed 42 \
+  --asi-profile reasoning_focus \
+  --mutation-limit 6 \
+  --output out/eval.json
+
+# Evaluate with a specific provider/model
+python -m agent_stability_engine.cli evaluate \
+  --agent-provider openai --agent-model gpt-4o-mini \
+  --prompt "Explain checksums" --run-count 3 --seed 42 \
+  --output out/eval-openai.json
+
+python -m agent_stability_engine.cli evaluate \
+  --agent-provider anthropic --agent-model claude-haiku-4-5 \
+  --prompt "Explain checksums" --run-count 3 --seed 42 \
+  --output out/eval-anthropic.json
+
+# Benchmark suite
+python -m agent_stability_engine.cli benchmark \
+  --suite examples/benchmarks/large_suite.json \
+  --run-count 5 --seed 42 \
+  --output out/bench.json
+
+# Regression gate
+python -m agent_stability_engine.cli regress \
+  --suite examples/benchmarks/reasoning_suite.json \
+  --baseline examples/baselines/reasoning_suite.baseline.json \
+  --run-count 3 --seed 42 --output out/regress.json
+
+# Drift, horizon, heal, export
+python -m agent_stability_engine.cli drift \
+  --current-report out/eval.json --baseline-report out/baseline_eval.json \
+  --output out/drift.json
+
+python -m agent_stability_engine.cli horizon \
+  --prompt "Plan migration strategy" \
+  --horizon 6 --run-count 5 --seed 42 --output out/horizon.json
+
+python -m agent_stability_engine.cli heal \
+  --prompt "Provide triage steps" \
+  --run-count 5 --seed 42 --max-attempts 2 \
+  --output out/heal.json
+
+python -m agent_stability_engine.cli export \
+  --input-report out/bench.json \
+  --history-report out/bench_prev.json \
+  --bundle-output out/compliance.bundle.json \
+  --pdf-output out/compliance.pdf
 ```
 
-Benchmark and regression outputs now include:
-- `asi_statistics` (`sample_size`, `mean`, `std_dev`, `std_error`, `ci_low`, `ci_high`)
-- `threshold_significance` in regression reports (`p_value`, `significant_pass`)
-- export bundles include signed attestation (`ASE_SIGNING_KEY`) and compliance PDF
+---
+
+## REST API
+
+The API server powers the [Stabilium web platform](https://stabilium.ruthwikdovala.com). Run it locally:
+
+```bash
+cd api
+uvicorn api.main:app --reload --port 8000
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `8000` | Server port (Railway sets this automatically) |
+| `ASE_API_DB_PATH` | `api/stabilium_api.db` | SQLite database path |
+| `ASE_API_SESSION_TTL_HOURS` | `168` | Session expiry (7 days) |
+| `ASE_WATCHDOG_TIMEOUT_SECONDS` | `600` | Max seconds a benchmark job may run |
+| `ASE_ALLOWED_ORIGINS` | `*` | CORS origins (comma-separated, or `*`) |
+
+### Auth endpoints
+
+```
+POST /auth/register   { name, business_name, email, password }  → { token, user }
+POST /auth/login      { email, password }                        → { token, user }
+GET  /auth/me                                                    → UserPublic
+POST /auth/logout
+```
+
+Passwords are hashed with PBKDF2-SHA256 (310,000 iterations). Sessions are stored in SQLite and expire after 7 days.
+
+### Job endpoints
+
+```
+POST   /jobs               Submit a new benchmark evaluation (async, returns 202)
+GET    /jobs               List all jobs for the authenticated user
+GET    /jobs/{id}          Get a single job (includes completed_cases for progress)
+GET    /jobs/{id}/report   Get the full JSON report once completed
+GET    /jobs/{id}/report/pdf  Download a PDF compliance report
+```
+
+**Job request body:**
+```json
+{
+  "provider": "openai | anthropic | custom",
+  "model": "gpt-4o-mini",
+  "api_key": "sk-...",
+  "run_count": 3,
+  "max_cases": 20,
+  "seed": 42
+}
+```
+
+Jobs run in a background subprocess. The `completed_cases` field updates after each case finishes — poll `GET /jobs` every few seconds to show a progress bar.
+
+### Live demo endpoint
+
+```
+POST /evaluate   Synchronous evaluation (no auth required, capped at 100 cases)
+```
+
+---
+
+## Database schema
+
+SQLite, WAL mode. Three tables:
+
+```sql
+users   (id, name, business_name, email, password_salt, password_hash, created_at)
+sessions (token, user_id, created_at, expires_at)
+jobs    (id, user_id, provider, model, run_count, max_cases, seed,
+         status, completed_cases, created_at, updated_at,
+         started_at, finished_at, error_message, result_json)
+```
+
+---
 
 ## GitHub Action (Regression Gate)
 
-Use the bundled action to gate PRs on benchmark ASI regressions.
-
 ```yaml
 name: ASE Regression Gate
-
 on:
   pull_request:
-
 jobs:
   ase-regress:
     runs-on: ubuntu-latest
@@ -59,43 +186,35 @@ jobs:
           baseline: examples/baselines/reasoning_suite.baseline.json
           run-count: "3"
           seed: "42"
-```
-
-For OpenAI-backed runs, add:
-
-```yaml
-      - uses: ruthwikdovala/Stabilium@main
-        with:
-          suite: examples/benchmarks/reasoning_suite.json
-          baseline: examples/baselines/reasoning_suite.baseline.json
           agent-provider: openai
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-## Build, Publish, Install (Python 3.11 Standard)
+---
 
-Use one interpreter path for the whole release sequence.
+## Build & publish
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip build twine
+pip install --upgrade pip build twine
 python -m build
 python -m twine upload dist/*
 ```
 
-Install verification in a clean environment:
+Install verification:
 
 ```bash
 python3.11 -m venv .venv-install-check
 source .venv-install-check/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -U agent-stability-engine
+pip install -U agent-stability-engine
 ase --help
 python -c "import agent_stability_engine; print(agent_stability_engine.__version__)"
 ```
 
-## Release Docs
+---
+
+## Docs
 
 - `docs/BUILD_PUBLISH_INSTALL.md`
 - `docs/COMPLIANCE_EXPORT.md`
