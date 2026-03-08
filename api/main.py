@@ -94,7 +94,8 @@ def _connect_db() -> sqlite3.Connection:
 def _init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _connect_db() as conn:
-        conn.executescript("""
+        conn.executescript(
+            """
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
                 business_name TEXT NOT NULL,
@@ -129,7 +130,8 @@ def _init_db() -> None:
                 result_json TEXT,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
-            """)
+            """
+        )
 
 
 class UserPublic(BaseModel):
