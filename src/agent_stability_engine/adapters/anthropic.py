@@ -40,7 +40,7 @@ class AnthropicChatAdapter:
         api_key: str | None = None,
         temperature: float | None = None,
         max_tokens: int = 1024,
-        timeout_seconds: float = 120.0,
+        timeout_seconds: float = 180.0,
         max_retries: int = 3,
         min_interval_seconds: float = 0.5,
         base_backoff_seconds: float = 0.5,
