@@ -1,7 +1,7 @@
 [phases.install]
 cmds = [
   "pip install -e .",
-  "pip install fastapi>=0.110 'uvicorn[standard]>=0.29' pydantic>=2.7"
+  "pip install fastapi>=0.110 'uvicorn[standard]>=0.29' pydantic>=2.7 psycopg2-binary>=2.9"
 ]
 
 [start]

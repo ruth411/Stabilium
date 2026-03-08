@@ -6,7 +6,6 @@ import json
 import multiprocessing
 import os
 import secrets
-import sqlite3
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -17,6 +16,8 @@ from typing import Annotated, Literal
 # Make sure the engine is importable
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import psycopg2
+import psycopg2.extras
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -34,7 +35,7 @@ from agent_stability_engine.runners.benchmark import run_benchmark_suite
 
 BASE_DIR = Path(__file__).parent.parent
 SUITE_PATH = BASE_DIR / "examples" / "benchmarks" / "large_suite.json"
-DB_PATH = Path(os.getenv("ASE_API_DB_PATH", str(Path(__file__).parent / "stabilium_api.db")))
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 SESSION_TTL_HOURS = int(os.getenv("ASE_API_SESSION_TTL_HOURS", "168"))
 WATCHDOG_TIMEOUT_SECONDS = int(os.getenv("ASE_WATCHDOG_TIMEOUT_SECONDS", "3600"))
 _PASSWORD_ITERATIONS = 310_000
@@ -87,39 +88,74 @@ def _verify_password(password: str, salt_hex: str, expected_hash_hex: str) -> bo
     return hmac.compare_digest(computed, expected_hash_hex)
 
 
-def _connect_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    return conn
+class _DBWrapper:
+    """Thin wrapper around a psycopg2 connection with sqlite3-compatible interface."""
+
+    def __init__(self, conn: psycopg2.extensions.connection) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, params: tuple | None = None) -> psycopg2.extensions.cursor:
+        cur = self._conn.cursor()
+        cur.execute(sql, params)
+        return cur
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def __enter__(self) -> "_DBWrapper":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        if exc_type:
+            self._conn.rollback()
+        else:
+            self._conn.commit()
+        self._conn.close()
+
+
+def _connect_db() -> _DBWrapper:
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    return _DBWrapper(conn)
 
 
 def _init_db() -> None:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _connect_db() as conn:
-        conn.executescript(
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
                 business_name TEXT NOT NULL,
                 email TEXT NOT NULL UNIQUE,
                 password_salt TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
                 created_at TEXT NOT NULL
-            );
-
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
-
+                expires_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 provider TEXT NOT NULL,
                 model TEXT NOT NULL,
                 run_count INTEGER NOT NULL,
@@ -132,22 +168,15 @@ def _init_db() -> None:
                 finished_at TEXT,
                 error_message TEXT,
                 result_json TEXT,
-                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
+                completed_cases INTEGER NOT NULL DEFAULT 0
+            )
             """
         )
-        # Migration: add completed_cases column to existing databases
-        try:
-            conn.execute("ALTER TABLE jobs ADD COLUMN completed_cases INTEGER NOT NULL DEFAULT 0")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # column already exists
-        # Migration: add name column to users table
-        try:
-            conn.execute("ALTER TABLE users ADD COLUMN name TEXT NOT NULL DEFAULT ''")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        # Idempotent migrations for pre-existing databases
+        conn.execute(
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_cases INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT ''")
 
 
 class UserPublic(BaseModel):
@@ -231,7 +260,7 @@ class EvaluateResponse(BaseModel):
     run_count: int
 
 
-def _row_to_user(row: sqlite3.Row) -> UserPublic:
+def _row_to_user(row: psycopg2.extras.RealDictRow) -> UserPublic:
     return UserPublic(
         id=str(row["id"]),
         name=str(row["name"]) if row["name"] else "",
@@ -241,7 +270,7 @@ def _row_to_user(row: sqlite3.Row) -> UserPublic:
     )
 
 
-def _row_to_job_summary(row: sqlite3.Row) -> JobSummary:
+def _row_to_job_summary(row: psycopg2.extras.RealDictRow) -> JobSummary:
     mean_asi: float | None = None
     num_cases: int | None = None
     result_json = row["result_json"]
@@ -280,14 +309,14 @@ def _row_to_job_summary(row: sqlite3.Row) -> JobSummary:
     )
 
 
-def _create_session(conn: sqlite3.Connection, user_id: str) -> str:
+def _create_session(conn: _DBWrapper, user_id: str) -> str:
     now = _utc_now()
     expires = now + timedelta(hours=SESSION_TTL_HOURS)
     token = f"ase_{secrets.token_urlsafe(32)}"
     conn.execute(
         """
         INSERT INTO sessions (token, user_id, created_at, expires_at)
-        VALUES (?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s)
         """,
         (
             token,
@@ -315,7 +344,7 @@ def _require_user(
             SELECT s.expires_at, u.id, u.name, u.business_name, u.email, u.created_at
             FROM sessions s
             JOIN users u ON u.id = s.user_id
-            WHERE s.token = ?
+            WHERE s.token = %s
             """,
             (token,),
         ).fetchone()
@@ -323,7 +352,7 @@ def _require_user(
             raise HTTPException(status_code=401, detail="invalid session")
         expires_at = _parse_utc_iso(str(row["expires_at"]))
         if expires_at <= _utc_now():
-            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            conn.execute("DELETE FROM sessions WHERE token = %s", (token,))
             conn.commit()
             raise HTTPException(status_code=401, detail="session expired")
         return _row_to_user(row)
@@ -383,7 +412,6 @@ def _run_benchmark_report(
     max_cases: int,
     seed: int,
     job_id: str | None = None,
-    db_path: Path | None = None,
 ) -> dict[str, object]:
     agent = _build_agent(
         provider=provider,
@@ -393,19 +421,17 @@ def _run_benchmark_report(
     )
 
     progress_callback = None
-    if job_id is not None and db_path is not None:
+    if job_id is not None:
         _jid = job_id
-        _dbp = db_path
 
         def progress_callback(completed: int, total: int, case_id: str) -> None:  # noqa: ARG001
             try:
                 now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                with sqlite3.connect(str(_dbp), timeout=5) as _conn:
+                with _connect_db() as _conn:
                     _conn.execute(
-                        "UPDATE jobs SET completed_cases = ?, updated_at = ? WHERE id = ?",
+                        "UPDATE jobs SET completed_cases = %s, updated_at = %s WHERE id = %s",
                         (completed, now, _jid),
                     )
-                    _conn.commit()
             except Exception:  # noqa: BLE001
                 pass  # never let progress tracking crash the benchmark
 
@@ -502,13 +528,11 @@ def _run_job_worker(
     max_cases: int,
     seed: int,
     job_id: str,
-    db_path: Path,
     started_at: str,
 ) -> None:
-    """Run the benchmark and write the result directly to SQLite.
+    """Run the benchmark and write the result directly to PostgreSQL.
 
-    Using SQLite avoids the multiprocessing.Queue pipe-buffer deadlock that
-    occurs when the report JSON is larger than the OS pipe buffer (~64 KB).
+    Runs in a subprocess. DATABASE_URL is inherited from the parent environment.
     """
     try:
         report = _run_benchmark_report(
@@ -520,7 +544,6 @@ def _run_job_worker(
             max_cases=max_cases,
             seed=seed,
             job_id=job_id,
-            db_path=db_path,
         )
         finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         final_report = _with_watchdog_metadata(
@@ -531,16 +554,15 @@ def _run_job_worker(
             reason=None,
         )
         payload = json.dumps(final_report)
-        with sqlite3.connect(str(db_path), timeout=10) as conn:
+        with _connect_db() as conn:
             conn.execute(
                 """
                 UPDATE jobs
-                SET status = ?, result_json = ?, updated_at = ?, finished_at = ?
-                WHERE id = ?
+                SET status = %s, result_json = %s, updated_at = %s, finished_at = %s
+                WHERE id = %s
                 """,
                 ("completed", payload, finished_at, finished_at, job_id),
             )
-            conn.commit()
     except Exception as exc:
         finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         raw_message = str(exc)[:8000] or "evaluation failed"
@@ -556,16 +578,26 @@ def _run_job_worker(
             reason=message,
             watchdog_triggered=False,
         )
-        with sqlite3.connect(str(db_path), timeout=10) as conn:
-            conn.execute(
-                """
-                UPDATE jobs
-                SET status = ?, error_message = ?, result_json = ?, updated_at = ?, finished_at = ?
-                WHERE id = ?
-                """,
-                ("failed", message, json.dumps(failure_report), finished_at, finished_at, job_id),
-            )
-            conn.commit()
+        try:
+            with _connect_db() as conn:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = %s, error_message = %s, result_json = %s,
+                        updated_at = %s, finished_at = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        "failed",
+                        message,
+                        json.dumps(failure_report),
+                        finished_at,
+                        finished_at,
+                        job_id,
+                    ),
+                )
+        except Exception:  # noqa: BLE001
+            pass  # best-effort; watchdog will mark job as failed if DB write fails
 
 
 def _run_job(
@@ -584,12 +616,11 @@ def _run_job(
         conn.execute(
             """
             UPDATE jobs
-            SET status = ?, started_at = ?, updated_at = ?
-            WHERE id = ?
+            SET status = %s, started_at = %s, updated_at = %s
+            WHERE id = %s
             """,
             ("running", started_at, started_at, job_id),
         )
-        conn.commit()
 
     process = multiprocessing.Process(
         target=_run_job_worker,
@@ -602,7 +633,6 @@ def _run_job(
             "max_cases": max_cases,
             "seed": seed,
             "job_id": job_id,
-            "db_path": DB_PATH,
             "started_at": started_at,
         },
         daemon=True,
@@ -617,7 +647,7 @@ def _run_job(
         _running_processes.pop(job_id, None)
 
     if not process.is_alive():
-        # Worker exited cleanly — it already wrote completed/failed to SQLite.
+        # Worker exited cleanly — it already wrote completed/failed to PostgreSQL.
         return
 
     # Watchdog: subprocess is still running past the timeout — kill it.
@@ -643,12 +673,12 @@ def _run_job(
         conn.execute(
             """
             UPDATE jobs
-            SET status = ?, error_message = ?, result_json = ?, updated_at = ?, finished_at = ?
-            WHERE id = ?
+            SET status = %s, error_message = %s, result_json = %s,
+                updated_at = %s, finished_at = %s
+            WHERE id = %s
             """,
             ("failed", reason, json.dumps(failure_report), finished_at, finished_at, job_id),
         )
-        conn.commit()
 
 
 def _spawn_job(
@@ -721,7 +751,7 @@ def register(req: RegisterRequest) -> AuthResponse:
                 INSERT INTO users (
                     id, name, business_name, email, password_salt, password_hash, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     user_id,
@@ -733,13 +763,13 @@ def register(req: RegisterRequest) -> AuthResponse:
                     now,
                 ),
             )
-        except sqlite3.IntegrityError as exc:
+        except psycopg2.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="email already registered") from exc
 
         token = _create_session(conn, user_id)
         conn.commit()
         row = conn.execute(
-            "SELECT id, name, business_name, email, created_at FROM users WHERE id = ?",
+            "SELECT id, name, business_name, email, created_at FROM users WHERE id = %s",
             (user_id,),
         ).fetchone()
 
@@ -757,7 +787,7 @@ def login(req: LoginRequest) -> AuthResponse:
             """
             SELECT id, name, business_name, email, created_at, password_salt, password_hash
             FROM users
-            WHERE email = ?
+            WHERE email = %s
             """,
             (email,),
         ).fetchone()
@@ -783,8 +813,7 @@ def logout(
 ) -> dict[str, bool]:
     if credentials is not None and credentials.credentials:
         with _connect_db() as conn:
-            conn.execute("DELETE FROM sessions WHERE token = ?", (credentials.credentials,))
-            conn.commit()
+            conn.execute("DELETE FROM sessions WHERE token = %s", (credentials.credentials,))
     return {"ok": True}
 
 
@@ -809,7 +838,7 @@ def create_job(
                 id, user_id, provider, model, run_count, max_cases, seed,
                 status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 job_id,
@@ -825,7 +854,7 @@ def create_job(
             ),
         )
         row = conn.execute(
-            "SELECT * FROM jobs WHERE id = ? AND user_id = ?", (job_id, user.id)
+            "SELECT * FROM jobs WHERE id = %s AND user_id = %s", (job_id, user.id)
         ).fetchone()
         conn.commit()
 
@@ -851,7 +880,7 @@ def list_jobs(user: Annotated[UserPublic, Depends(_require_user)]) -> JobListRes
         rows = conn.execute(
             """
             SELECT * FROM jobs
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT 100
             """,
@@ -868,7 +897,7 @@ def get_job(
 ) -> JobSummary:
     with _connect_db() as conn:
         row = conn.execute(
-            "SELECT * FROM jobs WHERE id = ? AND user_id = ?",
+            "SELECT * FROM jobs WHERE id = %s AND user_id = %s",
             (job_id, user.id),
         ).fetchone()
     if row is None:
@@ -883,7 +912,7 @@ def cancel_job(
 ) -> dict[str, str]:
     with _connect_db() as conn:
         row = conn.execute(
-            "SELECT status FROM jobs WHERE id = ? AND user_id = ?",
+            "SELECT status FROM jobs WHERE id = %s AND user_id = %s",
             (job_id, user.id),
         ).fetchone()
     if row is None:
@@ -904,19 +933,18 @@ def cancel_job(
         conn.execute(
             """
             UPDATE jobs
-            SET status = ?, error_message = ?, updated_at = ?, finished_at = ?
-            WHERE id = ?
+            SET status = %s, error_message = %s, updated_at = %s, finished_at = %s
+            WHERE id = %s
             """,
             ("cancelled", "Cancelled by user", now, now, job_id),
         )
-        conn.commit()
     return {"status": "cancelled"}
 
 
 def _load_job_report_payload(*, job_id: str, user_id: str) -> tuple[str, dict[str, object]]:
     with _connect_db() as conn:
         row = conn.execute(
-            "SELECT status, result_json FROM jobs WHERE id = ? AND user_id = ?",
+            "SELECT status, result_json FROM jobs WHERE id = %s AND user_id = %s",
             (job_id, user_id),
         ).fetchone()
     if row is None:
