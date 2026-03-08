@@ -40,6 +40,11 @@ WATCHDOG_TIMEOUT_SECONDS = int(os.getenv("ASE_WATCHDOG_TIMEOUT_SECONDS", "3600")
 _PASSWORD_ITERATIONS = 310_000
 _auth_scheme = HTTPBearer(auto_error=False)
 
+# Registry of active benchmark subprocesses, keyed by job_id.
+# Populated by _run_job so that cancel_job can terminate them.
+_running_processes: dict[str, multiprocessing.Process] = {}
+_running_processes_lock = threading.Lock()
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -182,7 +187,7 @@ class JobCreateRequest(BaseModel):
 
 class JobSummary(BaseModel):
     id: str
-    status: Literal["queued", "running", "completed", "failed"]
+    status: Literal["queued", "running", "completed", "failed", "cancelled"]
     provider: str
     model: str
     run_count: int
@@ -603,7 +608,13 @@ def _run_job(
         daemon=True,
     )
     process.start()
+    with _running_processes_lock:
+        _running_processes[job_id] = process
+
     process.join(timeout=WATCHDOG_TIMEOUT_SECONDS)
+
+    with _running_processes_lock:
+        _running_processes.pop(job_id, None)
 
     if not process.is_alive():
         # Worker exited cleanly — it already wrote completed/failed to SQLite.
@@ -863,6 +874,43 @@ def get_job(
     if row is None:
         raise HTTPException(status_code=404, detail="job not found")
     return _row_to_job_summary(row)
+
+
+@app.delete("/jobs/{job_id}", status_code=200)
+def cancel_job(
+    job_id: str,
+    user: Annotated[UserPublic, Depends(_require_user)],
+) -> dict[str, str]:
+    with _connect_db() as conn:
+        row = conn.execute(
+            "SELECT status FROM jobs WHERE id = ? AND user_id = ?",
+            (job_id, user.id),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    status_value = str(row["status"])
+    if status_value not in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail=f"job is already {status_value}")
+
+    # Terminate the subprocess if it is running.
+    with _running_processes_lock:
+        proc = _running_processes.pop(job_id, None)
+    if proc is not None and proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=5)
+
+    now = _utc_now_iso()
+    with _connect_db() as conn:
+        conn.execute(
+            """
+            UPDATE jobs
+            SET status = ?, error_message = ?, updated_at = ?, finished_at = ?
+            WHERE id = ?
+            """,
+            ("cancelled", "Cancelled by user", now, now, job_id),
+        )
+        conn.commit()
+    return {"status": "cancelled"}
 
 
 def _load_job_report_payload(*, job_id: str, user_id: str) -> tuple[str, dict[str, object]]:
