@@ -132,6 +132,14 @@ def _init_db() -> None:
             );
             """
         )
+        # Migration: add completed_cases column to existing databases
+        try:
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN completed_cases INTEGER NOT NULL DEFAULT 0"
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 class UserPublic(BaseModel):
@@ -182,6 +190,7 @@ class JobSummary(BaseModel):
     error_message: str | None = None
     mean_asi: float | None = None
     num_cases: int | None = None
+    completed_cases: int = 0
 
 
 class JobListResponse(BaseModel):
@@ -238,6 +247,9 @@ def _row_to_job_summary(row: sqlite3.Row) -> JobSummary:
         except json.JSONDecodeError:
             pass
 
+    raw_completed = row["completed_cases"]
+    completed_cases = int(raw_completed) if raw_completed is not None else 0
+
     return JobSummary(
         id=str(row["id"]),
         status=str(row["status"]),
@@ -253,6 +265,7 @@ def _row_to_job_summary(row: sqlite3.Row) -> JobSummary:
         error_message=str(row["error_message"]) if row["error_message"] else None,
         mean_asi=mean_asi,
         num_cases=num_cases,
+        completed_cases=completed_cases,
     )
 
 
@@ -358,6 +371,8 @@ def _run_benchmark_report(
     run_count: int,
     max_cases: int,
     seed: int,
+    job_id: str | None = None,
+    db_path: Path | None = None,
 ) -> dict[str, object]:
     agent = _build_agent(
         provider=provider,
@@ -365,6 +380,24 @@ def _run_benchmark_report(
         api_key=api_key,
         custom_endpoint=custom_endpoint,
     )
+
+    progress_callback = None
+    if job_id is not None and db_path is not None:
+        _jid = job_id
+        _dbp = db_path
+
+        def progress_callback(completed: int, total: int, case_id: str) -> None:  # noqa: ARG001
+            try:
+                now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                with sqlite3.connect(str(_dbp), timeout=5) as _conn:
+                    _conn.execute(
+                        "UPDATE jobs SET completed_cases = ?, updated_at = ? WHERE id = ?",
+                        (completed, now, _jid),
+                    )
+                    _conn.commit()
+            except Exception:  # noqa: BLE001
+                pass  # never let progress tracking crash the benchmark
+
     result = run_benchmark_suite(
         suite_path=SUITE_PATH,
         agent_fn=agent,
@@ -373,6 +406,7 @@ def _run_benchmark_report(
         embedding_provider=EmbeddingProvider.HASH,
         max_cases=max_cases,
         workers=1,
+        progress_callback=progress_callback,
     )
     return result.report
 
@@ -457,6 +491,8 @@ def _run_job_worker(
     run_count: int,
     max_cases: int,
     seed: int,
+    job_id: str,
+    db_path: Path,
 ) -> None:
     try:
         report = _run_benchmark_report(
@@ -467,6 +503,8 @@ def _run_job_worker(
             run_count=run_count,
             max_cases=max_cases,
             seed=seed,
+            job_id=job_id,
+            db_path=db_path,
         )
         result_queue.put({"ok": True, "report": report})
     except Exception as exc:
@@ -508,6 +546,8 @@ def _run_job(
             "run_count": run_count,
             "max_cases": max_cases,
             "seed": seed,
+            "job_id": job_id,
+            "db_path": DB_PATH,
         },
         daemon=True,
     )
