@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import multiprocessing
 import os
 import secrets
 import sqlite3
@@ -10,24 +11,33 @@ import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from queue import Empty
+from tempfile import NamedTemporaryFile
 from typing import Annotated, Literal
 
 # Make sure the engine is importable
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from agent_stability_engine.adapters import AnthropicChatAdapter, OpenAIChatAdapter
+from agent_stability_engine.adapters import (
+    AnthropicChatAdapter,
+    CustomEndpointAdapter,
+    OpenAIChatAdapter,
+)
 from agent_stability_engine.engine.embeddings import EmbeddingProvider
+from agent_stability_engine.report.export import build_export_bundle
+from agent_stability_engine.report.pdf_renderer import write_compliance_pdf
 from agent_stability_engine.runners.benchmark import run_benchmark_suite
 
 BASE_DIR = Path(__file__).parent.parent
 SUITE_PATH = BASE_DIR / "examples" / "benchmarks" / "large_suite.json"
 DB_PATH = Path(os.getenv("ASE_API_DB_PATH", str(Path(__file__).parent / "stabilium_api.db")))
 SESSION_TTL_HOURS = int(os.getenv("ASE_API_SESSION_TTL_HOURS", "168"))
+WATCHDOG_TIMEOUT_SECONDS = int(os.getenv("ASE_WATCHDOG_TIMEOUT_SECONDS", "600"))
 _PASSWORD_ITERATIONS = 310_000
 _auth_scheme = HTTPBearer(auto_error=False)
 
@@ -84,8 +94,7 @@ def _connect_db() -> sqlite3.Connection:
 def _init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _connect_db() as conn:
-        conn.executescript(
-            """
+        conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
                 business_name TEXT NOT NULL,
@@ -120,8 +129,7 @@ def _init_db() -> None:
                 result_json TEXT,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
-            """
-        )
+            """)
 
 
 class UserPublic(BaseModel):
@@ -148,8 +156,9 @@ class LoginRequest(BaseModel):
 
 
 class JobCreateRequest(BaseModel):
-    provider: Literal["openai", "anthropic"]
+    provider: Literal["openai", "anthropic", "custom"]
     model: str = Field(min_length=1, max_length=200)
+    custom_endpoint: str | None = Field(default=None, max_length=2048)
     api_key: str = Field(min_length=1, max_length=2048)
     run_count: int = Field(default=3, ge=1, le=10)
     max_cases: int = Field(default=5, ge=1, le=100)
@@ -183,8 +192,9 @@ class JobReportResponse(BaseModel):
 
 
 class EvaluateRequest(BaseModel):
-    provider: Literal["openai", "anthropic"]
+    provider: Literal["openai", "anthropic", "custom"]
     model: str = Field(min_length=1, max_length=200)
+    custom_endpoint: str | None = Field(default=None, max_length=2048)
     api_key: str = Field(min_length=1, max_length=2048)
     run_count: int = Field(default=3, ge=1, le=10)
     max_cases: int = Field(default=5, ge=1, le=100)
@@ -294,13 +304,171 @@ def _require_user(
 
 
 def _build_agent(
-    provider: str, model: str, api_key: str
-) -> OpenAIChatAdapter | AnthropicChatAdapter:
+    provider: str,
+    model: str,
+    api_key: str,
+    custom_endpoint: str | None = None,
+) -> OpenAIChatAdapter | AnthropicChatAdapter | CustomEndpointAdapter:
     if provider == "openai":
         return OpenAIChatAdapter(model=model, api_key=api_key)
     if provider == "anthropic":
         return AnthropicChatAdapter(model=model, api_key=api_key)
+    if provider == "custom":
+        if custom_endpoint is None:
+            msg = "custom_endpoint is required when provider=custom"
+            raise ValueError(msg)
+        return CustomEndpointAdapter(endpoint_url=custom_endpoint, model=model, api_key=api_key)
     raise ValueError(f"unsupported provider: {provider}")
+
+
+def _validate_custom_endpoint(provider: str, custom_endpoint: str | None) -> str | None:
+    endpoint = custom_endpoint.strip() if isinstance(custom_endpoint, str) else None
+    if provider == "custom":
+        if not endpoint:
+            raise HTTPException(status_code=400, detail="custom_endpoint is required for custom")
+        if not endpoint.startswith(("http://", "https://")):
+            raise HTTPException(
+                status_code=400,
+                detail="custom_endpoint must start with http:// or https://",
+            )
+        return endpoint
+    if endpoint:
+        raise HTTPException(
+            status_code=400,
+            detail="custom_endpoint is only valid when provider is custom",
+        )
+    return None
+
+
+def _sanitize_error_message(message: str, api_key: str) -> str:
+    sanitized = message
+    if api_key and api_key in sanitized:
+        sanitized = sanitized.replace(api_key, "[REDACTED_API_KEY]")
+    return sanitized
+
+
+def _run_benchmark_report(
+    *,
+    provider: str,
+    model: str,
+    api_key: str,
+    custom_endpoint: str | None,
+    run_count: int,
+    max_cases: int,
+    seed: int,
+) -> dict[str, object]:
+    agent = _build_agent(
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        custom_endpoint=custom_endpoint,
+    )
+    result = run_benchmark_suite(
+        suite_path=SUITE_PATH,
+        agent_fn=agent,
+        run_count=run_count,
+        seed=seed,
+        embedding_provider=EmbeddingProvider.HASH,
+        max_cases=max_cases,
+        workers=1,
+    )
+    return result.report
+
+
+def _with_watchdog_metadata(
+    *,
+    report: dict[str, object],
+    started_at: str,
+    finished_at: str,
+    triggered: bool,
+    reason: str | None,
+) -> dict[str, object]:
+    elapsed = (_parse_utc_iso(finished_at) - _parse_utc_iso(started_at)).total_seconds()
+    watchdog_block: dict[str, object] = {
+        "enabled": True,
+        "timeout_seconds": WATCHDOG_TIMEOUT_SECONDS,
+        "triggered": triggered,
+        "trigger_reason": reason,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "elapsed_seconds": round(max(elapsed, 0.0), 3),
+    }
+    merged = dict(report)
+    existing_notes = merged.get("notes")
+    notes: list[str] = []
+    if isinstance(existing_notes, list):
+        notes = [str(note) for note in existing_notes]
+    if triggered:
+        notes.append(
+            "watchdog_triggered=true " f"reason={reason} timeout_seconds={WATCHDOG_TIMEOUT_SECONDS}"
+        )
+    else:
+        notes.append("watchdog_triggered=false " f"timeout_seconds={WATCHDOG_TIMEOUT_SECONDS}")
+    merged["notes"] = notes
+    merged["execution_watchdog"] = watchdog_block
+    return merged
+
+
+def _build_failure_report(
+    *,
+    provider: str,
+    model: str,
+    run_count: int,
+    max_cases: int,
+    seed: int,
+    started_at: str,
+    finished_at: str,
+    reason: str,
+    watchdog_triggered: bool,
+) -> dict[str, object]:
+    report: dict[str, object] = {
+        "report_type": "job_failure",
+        "timestamp_utc": finished_at,
+        "status": "failed",
+        "provider": provider,
+        "model": model,
+        "run_count": run_count,
+        "max_cases": max_cases,
+        "seed": seed,
+        "failure_reason": reason,
+        "notes": [
+            "evaluation_failed=true",
+            f"watchdog_triggered={str(watchdog_triggered).lower()}",
+        ],
+    }
+    return _with_watchdog_metadata(
+        report=report,
+        started_at=started_at,
+        finished_at=finished_at,
+        triggered=watchdog_triggered,
+        reason=reason if watchdog_triggered else None,
+    )
+
+
+def _run_job_worker(
+    *,
+    result_queue: multiprocessing.Queue[dict[str, object]],
+    provider: str,
+    model: str,
+    api_key: str,
+    custom_endpoint: str | None,
+    run_count: int,
+    max_cases: int,
+    seed: int,
+) -> None:
+    try:
+        report = _run_benchmark_report(
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            custom_endpoint=custom_endpoint,
+            run_count=run_count,
+            max_cases=max_cases,
+            seed=seed,
+        )
+        result_queue.put({"ok": True, "report": report})
+    except Exception as exc:
+        result_queue.put({"ok": False, "error": (str(exc)[:8000] or "evaluation failed")})
 
 
 def _run_job(
@@ -309,6 +477,7 @@ def _run_job(
     provider: str,
     model: str,
     api_key: str,
+    custom_endpoint: str | None,
     run_count: int,
     max_cases: int,
     seed: int,
@@ -325,19 +494,71 @@ def _run_job(
         )
         conn.commit()
 
-    try:
-        agent = _build_agent(provider=provider, model=model, api_key=api_key)
-        result = run_benchmark_suite(
-            suite_path=SUITE_PATH,
-            agent_fn=agent,
-            run_count=run_count,
-            seed=seed,
-            embedding_provider=EmbeddingProvider.HASH,
-            max_cases=max_cases,
-            workers=1,
-        )
-        payload = json.dumps(result.report)
+    result_queue: multiprocessing.Queue[dict[str, object]] = multiprocessing.Queue(maxsize=1)
+    process = multiprocessing.Process(
+        target=_run_job_worker,
+        kwargs={
+            "result_queue": result_queue,
+            "provider": provider,
+            "model": model,
+            "api_key": api_key,
+            "custom_endpoint": custom_endpoint,
+            "run_count": run_count,
+            "max_cases": max_cases,
+            "seed": seed,
+        },
+        daemon=True,
+    )
+    process.start()
+    process.join(timeout=WATCHDOG_TIMEOUT_SECONDS)
+
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
         finished_at = _utc_now_iso()
+        reason = (
+            "watchdog_timeout: evaluation considered stagnant and cancelled "
+            f"after {WATCHDOG_TIMEOUT_SECONDS} seconds"
+        )
+        failure_report = _build_failure_report(
+            provider=provider,
+            model=model,
+            run_count=run_count,
+            max_cases=max_cases,
+            seed=seed,
+            started_at=started_at,
+            finished_at=finished_at,
+            reason=reason,
+            watchdog_triggered=True,
+        )
+        with _connect_db() as conn:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, error_message = ?, result_json = ?, updated_at = ?, finished_at = ?
+                WHERE id = ?
+                """,
+                ("failed", reason, json.dumps(failure_report), finished_at, finished_at, job_id),
+            )
+            conn.commit()
+        return
+
+    try:
+        outcome = result_queue.get_nowait()
+    except Empty:
+        outcome = {"ok": False, "error": "evaluation process returned no result"}
+
+    ok = outcome.get("ok")
+    if ok is True and isinstance(outcome.get("report"), dict):
+        finished_at = _utc_now_iso()
+        report = _with_watchdog_metadata(
+            report=outcome["report"],  # type: ignore[index]
+            started_at=started_at,
+            finished_at=finished_at,
+            triggered=False,
+            reason=None,
+        )
+        payload = json.dumps(report)
         with _connect_db() as conn:
             conn.execute(
                 """
@@ -348,19 +569,32 @@ def _run_job(
                 ("completed", payload, finished_at, finished_at, job_id),
             )
             conn.commit()
-    except Exception as exc:
-        finished_at = _utc_now_iso()
-        message = str(exc)[:2000] or "evaluation failed"
-        with _connect_db() as conn:
-            conn.execute(
-                """
-                UPDATE jobs
-                SET status = ?, error_message = ?, updated_at = ?, finished_at = ?
-                WHERE id = ?
-                """,
-                ("failed", message, finished_at, finished_at, job_id),
-            )
-            conn.commit()
+        return
+
+    finished_at = _utc_now_iso()
+    raw_message = str(outcome.get("error") or "evaluation failed")
+    message = _sanitize_error_message(raw_message, api_key)[:2000]
+    failure_report = _build_failure_report(
+        provider=provider,
+        model=model,
+        run_count=run_count,
+        max_cases=max_cases,
+        seed=seed,
+        started_at=started_at,
+        finished_at=finished_at,
+        reason=message,
+        watchdog_triggered=False,
+    )
+    with _connect_db() as conn:
+        conn.execute(
+            """
+            UPDATE jobs
+            SET status = ?, error_message = ?, result_json = ?, updated_at = ?, finished_at = ?
+            WHERE id = ?
+            """,
+            ("failed", message, json.dumps(failure_report), finished_at, finished_at, job_id),
+        )
+        conn.commit()
 
 
 def _spawn_job(
@@ -369,6 +603,7 @@ def _spawn_job(
     provider: str,
     model: str,
     api_key: str,
+    custom_endpoint: str | None,
     run_count: int,
     max_cases: int,
     seed: int,
@@ -380,6 +615,7 @@ def _spawn_job(
             "provider": provider,
             "model": model,
             "api_key": api_key,
+            "custom_endpoint": custom_endpoint,
             "run_count": run_count,
             "max_cases": max_cases,
             "seed": seed,
@@ -497,6 +733,7 @@ def create_job(
 ) -> JobSummary:
     if not SUITE_PATH.exists():
         raise HTTPException(status_code=500, detail="benchmark suite missing on server")
+    custom_endpoint = _validate_custom_endpoint(req.provider, req.custom_endpoint)
     api_key = req.api_key.strip()
     if not api_key:
         raise HTTPException(status_code=400, detail="api_key is required")
@@ -538,6 +775,7 @@ def create_job(
         provider=req.provider,
         model=req.model.strip(),
         api_key=api_key,
+        custom_endpoint=custom_endpoint,
         run_count=req.run_count,
         max_cases=req.max_cases,
         seed=req.seed,
@@ -576,24 +814,22 @@ def get_job(
     return _row_to_job_summary(row)
 
 
-@app.get("/jobs/{job_id}/report", response_model=JobReportResponse)
-def get_job_report(
-    job_id: str,
-    user: Annotated[UserPublic, Depends(_require_user)],
-) -> JobReportResponse:
+def _load_job_report_payload(*, job_id: str, user_id: str) -> tuple[str, dict[str, object]]:
     with _connect_db() as conn:
         row = conn.execute(
             "SELECT status, result_json FROM jobs WHERE id = ? AND user_id = ?",
-            (job_id, user.id),
+            (job_id, user_id),
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="job not found")
+
     status_value = str(row["status"])
-    if status_value != "completed":
+    if status_value not in {"completed", "failed"}:
         raise HTTPException(
             status_code=409,
             detail=f"report not available while job status is {status_value}",
         )
+
     raw_payload = row["result_json"]
     if not isinstance(raw_payload, str):
         raise HTTPException(status_code=500, detail="report payload missing")
@@ -603,32 +839,60 @@ def get_job_report(
         raise HTTPException(status_code=500, detail="report payload is invalid") from exc
     if not isinstance(report_payload, dict):
         raise HTTPException(status_code=500, detail="report payload has unexpected shape")
+    return (status_value, report_payload)
+
+
+@app.get("/jobs/{job_id}/report", response_model=JobReportResponse)
+def get_job_report(
+    job_id: str,
+    user: Annotated[UserPublic, Depends(_require_user)],
+) -> JobReportResponse:
+    _, report_payload = _load_job_report_payload(job_id=job_id, user_id=user.id)
     return JobReportResponse(job_id=job_id, report=report_payload)
+
+
+@app.get("/jobs/{job_id}/report/pdf")
+def get_job_report_pdf(
+    job_id: str,
+    user: Annotated[UserPublic, Depends(_require_user)],
+) -> Response:
+    _, report_payload = _load_job_report_payload(job_id=job_id, user_id=user.id)
+    bundle = build_export_bundle(input_report=report_payload, history_reports=[])
+    with NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
+        pdf_path = Path(tmp_file.name)
+    try:
+        write_compliance_pdf(bundle, pdf_path)
+        pdf_bytes = pdf_path.read_bytes()
+    finally:
+        pdf_path.unlink(missing_ok=True)
+
+    headers = {"Content-Disposition": f'attachment; filename="{job_id}-report.pdf"'}
+    return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
 
 
 @app.post("/evaluate", response_model=EvaluateResponse)
 def evaluate(req: EvaluateRequest) -> EvaluateResponse:
     if not SUITE_PATH.exists():
         raise HTTPException(status_code=500, detail="benchmark suite missing on server")
+    custom_endpoint = _validate_custom_endpoint(req.provider, req.custom_endpoint)
     api_key = req.api_key.strip()
     if not api_key:
         raise HTTPException(status_code=400, detail="api_key is required")
 
     try:
-        agent = _build_agent(provider=req.provider, model=req.model.strip(), api_key=api_key)
-        result = run_benchmark_suite(
-            suite_path=SUITE_PATH,
-            agent_fn=agent,
+        report = _run_benchmark_report(
+            provider=req.provider,
+            model=req.model.strip(),
+            api_key=api_key,
+            custom_endpoint=custom_endpoint,
             run_count=req.run_count,
-            seed=req.seed,
-            embedding_provider=EmbeddingProvider.HASH,
             max_cases=req.max_cases,
-            workers=1,
+            seed=req.seed,
         )
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"evaluation failed: {exc}") from exc
+        safe_error = _sanitize_error_message(str(exc), api_key)
+        raise HTTPException(status_code=502, detail=f"evaluation failed: {safe_error}") from exc
 
-    report = result.report
     mean_asi = report.get("mean_asi")
     num_cases = report.get("num_cases")
     domain_scores = report.get("domain_scores")
