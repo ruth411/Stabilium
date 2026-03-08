@@ -4,7 +4,7 @@ WORKDIR /app
 COPY . .
 
 RUN pip install --no-cache-dir -e . && \
-    pip install --no-cache-dir fastapi>=0.110 "uvicorn[standard]>=0.29" pydantic>=2.7
+    pip install --no-cache-dir fastapi>=0.110 "uvicorn[standard]>=0.29" pydantic>=2.7 psycopg2-binary>=2.9
 
 EXPOSE 8000
 
