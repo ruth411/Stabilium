@@ -11,7 +11,6 @@ import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from queue import Empty
 from tempfile import NamedTemporaryFile
 from typing import Annotated, Literal
 
@@ -490,7 +489,6 @@ def _build_failure_report(
 
 def _run_job_worker(
     *,
-    result_queue: multiprocessing.Queue[dict[str, object]],
     provider: str,
     model: str,
     api_key: str,
@@ -500,7 +498,13 @@ def _run_job_worker(
     seed: int,
     job_id: str,
     db_path: Path,
+    started_at: str,
 ) -> None:
+    """Run the benchmark and write the result directly to SQLite.
+
+    Using SQLite avoids the multiprocessing.Queue pipe-buffer deadlock that
+    occurs when the report JSON is larger than the OS pipe buffer (~64 KB).
+    """
     try:
         report = _run_benchmark_report(
             provider=provider,
@@ -513,9 +517,50 @@ def _run_job_worker(
             job_id=job_id,
             db_path=db_path,
         )
-        result_queue.put({"ok": True, "report": report})
+        finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        final_report = _with_watchdog_metadata(
+            report=report,
+            started_at=started_at,
+            finished_at=finished_at,
+            triggered=False,
+            reason=None,
+        )
+        payload = json.dumps(final_report)
+        with sqlite3.connect(str(db_path), timeout=10) as conn:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, result_json = ?, updated_at = ?, finished_at = ?
+                WHERE id = ?
+                """,
+                ("completed", payload, finished_at, finished_at, job_id),
+            )
+            conn.commit()
     except Exception as exc:
-        result_queue.put({"ok": False, "error": (str(exc)[:8000] or "evaluation failed")})
+        finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        raw_message = str(exc)[:8000] or "evaluation failed"
+        message = _sanitize_error_message(raw_message, api_key)[:2000]
+        failure_report = _build_failure_report(
+            provider=provider,
+            model=model,
+            run_count=run_count,
+            max_cases=max_cases,
+            seed=seed,
+            started_at=started_at,
+            finished_at=finished_at,
+            reason=message,
+            watchdog_triggered=False,
+        )
+        with sqlite3.connect(str(db_path), timeout=10) as conn:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, error_message = ?, result_json = ?, updated_at = ?, finished_at = ?
+                WHERE id = ?
+                """,
+                ("failed", message, json.dumps(failure_report), finished_at, finished_at, job_id),
+            )
+            conn.commit()
 
 
 def _run_job(
@@ -541,11 +586,9 @@ def _run_job(
         )
         conn.commit()
 
-    result_queue: multiprocessing.Queue[dict[str, object]] = multiprocessing.Queue(maxsize=1)
     process = multiprocessing.Process(
         target=_run_job_worker,
         kwargs={
-            "result_queue": result_queue,
             "provider": provider,
             "model": model,
             "api_key": api_key,
@@ -555,74 +598,25 @@ def _run_job(
             "seed": seed,
             "job_id": job_id,
             "db_path": DB_PATH,
+            "started_at": started_at,
         },
         daemon=True,
     )
     process.start()
     process.join(timeout=WATCHDOG_TIMEOUT_SECONDS)
 
-    if process.is_alive():
-        process.terminate()
-        process.join(timeout=5)
-        finished_at = _utc_now_iso()
-        reason = (
-            "watchdog_timeout: evaluation considered stagnant and cancelled "
-            f"after {WATCHDOG_TIMEOUT_SECONDS} seconds"
-        )
-        failure_report = _build_failure_report(
-            provider=provider,
-            model=model,
-            run_count=run_count,
-            max_cases=max_cases,
-            seed=seed,
-            started_at=started_at,
-            finished_at=finished_at,
-            reason=reason,
-            watchdog_triggered=True,
-        )
-        with _connect_db() as conn:
-            conn.execute(
-                """
-                UPDATE jobs
-                SET status = ?, error_message = ?, result_json = ?, updated_at = ?, finished_at = ?
-                WHERE id = ?
-                """,
-                ("failed", reason, json.dumps(failure_report), finished_at, finished_at, job_id),
-            )
-            conn.commit()
+    if not process.is_alive():
+        # Worker exited cleanly — it already wrote completed/failed to SQLite.
         return
 
-    try:
-        outcome = result_queue.get_nowait()
-    except Empty:
-        outcome = {"ok": False, "error": "evaluation process returned no result"}
-
-    ok = outcome.get("ok")
-    if ok is True and isinstance(outcome.get("report"), dict):
-        finished_at = _utc_now_iso()
-        report = _with_watchdog_metadata(
-            report=outcome["report"],  # type: ignore[index]
-            started_at=started_at,
-            finished_at=finished_at,
-            triggered=False,
-            reason=None,
-        )
-        payload = json.dumps(report)
-        with _connect_db() as conn:
-            conn.execute(
-                """
-                UPDATE jobs
-                SET status = ?, result_json = ?, updated_at = ?, finished_at = ?
-                WHERE id = ?
-                """,
-                ("completed", payload, finished_at, finished_at, job_id),
-            )
-            conn.commit()
-        return
-
+    # Watchdog: subprocess is still running past the timeout — kill it.
+    process.terminate()
+    process.join(timeout=5)
     finished_at = _utc_now_iso()
-    raw_message = str(outcome.get("error") or "evaluation failed")
-    message = _sanitize_error_message(raw_message, api_key)[:2000]
+    reason = (
+        "watchdog_timeout: evaluation considered stagnant and cancelled "
+        f"after {WATCHDOG_TIMEOUT_SECONDS} seconds"
+    )
     failure_report = _build_failure_report(
         provider=provider,
         model=model,
@@ -631,8 +625,8 @@ def _run_job(
         seed=seed,
         started_at=started_at,
         finished_at=finished_at,
-        reason=message,
-        watchdog_triggered=False,
+        reason=reason,
+        watchdog_triggered=True,
     )
     with _connect_db() as conn:
         conn.execute(
@@ -641,7 +635,7 @@ def _run_job(
             SET status = ?, error_message = ?, result_json = ?, updated_at = ?, finished_at = ?
             WHERE id = ?
             """,
-            ("failed", message, json.dumps(failure_report), finished_at, finished_at, job_id),
+            ("failed", reason, json.dumps(failure_report), finished_at, finished_at, job_id),
         )
         conn.commit()
 
