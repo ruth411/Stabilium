@@ -134,9 +134,7 @@ def _init_db() -> None:
         )
         # Migration: add completed_cases column to existing databases
         try:
-            conn.execute(
-                "ALTER TABLE jobs ADD COLUMN completed_cases INTEGER NOT NULL DEFAULT 0"
-            )
+            conn.execute("ALTER TABLE jobs ADD COLUMN completed_cases INTEGER NOT NULL DEFAULT 0")
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
