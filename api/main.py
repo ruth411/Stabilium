@@ -37,7 +37,7 @@ BASE_DIR = Path(__file__).parent.parent
 SUITE_PATH = BASE_DIR / "examples" / "benchmarks" / "large_suite.json"
 DB_PATH = Path(os.getenv("ASE_API_DB_PATH", str(Path(__file__).parent / "stabilium_api.db")))
 SESSION_TTL_HOURS = int(os.getenv("ASE_API_SESSION_TTL_HOURS", "168"))
-WATCHDOG_TIMEOUT_SECONDS = int(os.getenv("ASE_WATCHDOG_TIMEOUT_SECONDS", "600"))
+WATCHDOG_TIMEOUT_SECONDS = int(os.getenv("ASE_WATCHDOG_TIMEOUT_SECONDS", "3600"))
 _PASSWORD_ITERATIONS = 310_000
 _auth_scheme = HTTPBearer(auto_error=False)
 

@@ -41,10 +41,10 @@ class AnthropicChatAdapter:
         temperature: float | None = None,
         max_tokens: int = 1024,
         timeout_seconds: float = 120.0,
-        max_retries: int = 4,
+        max_retries: int = 3,
         min_interval_seconds: float = 0.5,
         base_backoff_seconds: float = 0.5,
-        rate_limit_backoff_seconds: float = 30.0,
+        rate_limit_backoff_seconds: float = 12.0,
         jitter_seconds: float = 0.5,
         sender: Callable[[dict[str, object]], dict[str, object]] | None = None,
     ) -> None:
