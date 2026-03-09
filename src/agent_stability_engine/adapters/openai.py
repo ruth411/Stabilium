@@ -9,6 +9,7 @@ from typing import Callable
 from urllib import error, request
 
 _OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+_OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 
 # Estimated USD per 1M tokens (input/output) for common models.
 # Unknown models default to zero-cost estimation.
@@ -44,6 +45,7 @@ class OpenAIChatAdapter:
         base_backoff_seconds: float = 0.5,
         jitter_seconds: float = 0.1,
         sender: Callable[[dict[str, object]], dict[str, object]] | None = None,
+        chat_sender: Callable[[dict[str, object]], dict[str, object]] | None = None,
     ) -> None:
         if not model:
             msg = "model must be non-empty"
@@ -67,6 +69,7 @@ class OpenAIChatAdapter:
         self._base_backoff_seconds = base_backoff_seconds
         self._jitter_seconds = jitter_seconds
         self._sender = sender or self._default_sender
+        self._chat_sender = chat_sender or self._default_chat_sender
 
         self._usage = _UsageTotals()
         self._last_request_monotonic = 0.0
@@ -88,6 +91,32 @@ class OpenAIChatAdapter:
                 self._track_usage(prompt_tokens, completion_tokens, total_tokens)
                 text = _extract_text(response)
                 return text
+            except Exception:
+                if attempt >= self._max_retries:
+                    raise
+                self._usage.retries += 1
+                self._sleep_backoff(attempt, rng)
+
+        msg = "unreachable retry state"
+        raise RuntimeError(msg)
+
+    def call_messages(
+        self,
+        messages: list[dict[str, str]],
+        rng: random.Random | None = None,
+    ) -> str:
+        payload: dict[str, object] = {"model": self._model, "messages": messages}
+        if self._temperature is not None:
+            payload["temperature"] = self._temperature
+
+        attempts = self._max_retries + 1
+        for attempt in range(attempts):
+            self._respect_rate_limit()
+            try:
+                response = self._chat_sender(payload)
+                prompt_tokens, completion_tokens, total_tokens = _extract_usage(response)
+                self._track_usage(prompt_tokens, completion_tokens, total_tokens)
+                return _extract_text(response)
             except Exception:
                 if attempt >= self._max_retries:
                     raise
@@ -126,6 +155,33 @@ class OpenAIChatAdapter:
                 loaded = json.loads(response_data)
                 if not isinstance(loaded, dict):
                     msg = "OpenAI response must be a JSON object"
+                    raise ValueError(msg)
+                return loaded
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            msg = f"OpenAI HTTP error {exc.code}: {body}"
+            raise RuntimeError(msg) from exc
+        except error.URLError as exc:
+            msg = f"OpenAI request error: {exc.reason}"
+            raise RuntimeError(msg) from exc
+
+    def _default_chat_sender(self, payload: dict[str, object]) -> dict[str, object]:
+        data = json.dumps(payload).encode("utf-8")
+        http_request = request.Request(
+            _OPENAI_CHAT_URL,
+            method="POST",
+            data=data,
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with request.urlopen(http_request, timeout=self._timeout_seconds) as response:
+                response_data = response.read().decode("utf-8")
+                loaded = json.loads(response_data)
+                if not isinstance(loaded, dict):
+                    msg = "OpenAI chat response must be a JSON object"
                     raise ValueError(msg)
                 return loaded
         except error.HTTPError as exc:

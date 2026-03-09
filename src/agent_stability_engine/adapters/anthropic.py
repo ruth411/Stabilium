@@ -107,6 +107,53 @@ class AnthropicChatAdapter:
         msg = "unreachable retry state"
         raise RuntimeError(msg)
 
+    def call_messages(
+        self,
+        messages: list[dict[str, str]],
+        rng: random.Random | None = None,
+    ) -> str:
+        system_chunks: list[str] = []
+        filtered_messages: list[dict[str, str]] = []
+        for message in messages:
+            role = message.get("role", "").strip()
+            content = message.get("content", "").strip()
+            if not role or not content:
+                continue
+            if role == "system":
+                system_chunks.append(content)
+            else:
+                filtered_messages.append({"role": role, "content": content})
+
+        payload: dict[str, object] = {
+            "model": self._model,
+            "max_tokens": self._max_tokens,
+            "messages": filtered_messages,
+        }
+        if system_chunks:
+            payload["system"] = "\n\n".join(system_chunks)
+        if self._temperature is not None:
+            payload["temperature"] = self._temperature
+
+        attempts = self._max_retries + 1
+        for attempt in range(attempts):
+            self._respect_rate_limit()
+            try:
+                response = self._sender(payload)
+                input_tokens, output_tokens = _extract_usage(response)
+                self._track_usage(input_tokens, output_tokens)
+                return _extract_text(response)
+            except RuntimeError as exc:
+                if attempt >= self._max_retries:
+                    raise
+                self._usage.retries += 1
+                if "429" in str(exc):
+                    self._sleep_rate_limit(attempt, rng)
+                else:
+                    self._sleep_backoff(attempt, rng)
+
+        msg = "unreachable retry state"
+        raise RuntimeError(msg)
+
     def usage_snapshot(self) -> dict[str, object]:
         return {
             "provider": "anthropic",

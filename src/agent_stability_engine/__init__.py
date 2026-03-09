@@ -2,6 +2,7 @@
 
 from importlib.metadata import PackageNotFoundError, version
 
+from agent_stability_engine.engine.conversation import ConversationEvaluation, ConversationEvaluator
 from agent_stability_engine.engine.evaluator import StabilityEvaluation, StabilityEvaluator
 from agent_stability_engine.engine.sampling import MultiRunResult, MultiRunSampler
 from agent_stability_engine.engine.self_healing import SelfHealingEngine, SelfHealingResult
@@ -23,6 +24,8 @@ __version__ = _resolve_version()
 
 __all__ = [
     "EmbeddingVarianceScorer",
+    "ConversationEvaluation",
+    "ConversationEvaluator",
     "MultiRunResult",
     "MultiRunSampler",
     "REPORT_SCHEMA_VERSION",

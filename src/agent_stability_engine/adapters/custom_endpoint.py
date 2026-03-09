@@ -74,6 +74,32 @@ class CustomEndpointAdapter:
         msg = "unreachable retry state"
         raise RuntimeError(msg)
 
+    def call_messages(
+        self,
+        messages: list[dict[str, str]],
+        rng: random.Random | None = None,
+    ) -> str:
+        payload: dict[str, object] = {"model": self._model, "messages": messages}
+        attempts = self._max_retries + 1
+        for attempt in range(attempts):
+            try:
+                response = self._sender(payload)
+                self._usage.requests += 1
+                return _extract_text_or_join_messages(response)
+            except Exception:
+                if attempt >= self._max_retries:
+                    raise
+                self._usage.retries += 1
+                delay = self._base_backoff_seconds * (2**attempt)
+                if self._jitter_seconds > 0:
+                    jitter_source = rng.random() if rng is not None else random.random()
+                    delay += jitter_source * self._jitter_seconds
+                if delay > 0:
+                    time.sleep(delay)
+
+        msg = "unreachable retry state"
+        raise RuntimeError(msg)
+
     def usage_snapshot(self) -> dict[str, object]:
         return {
             "provider": "custom",
@@ -129,3 +155,21 @@ def _extract_text(response: dict[str, object]) -> str:
 
     msg = "unable to extract text from custom endpoint response"
     raise ValueError(msg)
+
+
+def _extract_text_or_join_messages(response: dict[str, object]) -> str:
+    try:
+        return _extract_text(response)
+    except ValueError:
+        messages_obj = response.get("messages")
+        if isinstance(messages_obj, list):
+            parts: list[str] = []
+            for item in messages_obj:
+                if isinstance(item, dict):
+                    content = item.get("content")
+                    if isinstance(content, str) and content.strip():
+                        parts.append(content.strip())
+            if parts:
+                return "\n".join(parts)
+        msg = "unable to extract text from custom endpoint message response"
+        raise ValueError(msg) from None

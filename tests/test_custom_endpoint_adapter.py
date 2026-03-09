@@ -52,3 +52,32 @@ def test_custom_endpoint_adapter_retries_and_succeeds() -> None:
     assert result == "ok"
     assert calls == 2
     assert usage["retries"] == 1
+
+
+def test_custom_endpoint_adapter_call_messages_joins_nonstandard_response() -> None:
+    def sender(payload: dict[str, object]) -> dict[str, object]:
+        messages = payload.get("messages")
+        assert isinstance(messages, list)
+        return {
+            "messages": [
+                {"content": "part one"},
+                {"content": "part two"},
+            ]
+        }
+
+    adapter = CustomEndpointAdapter(
+        endpoint_url="https://example.com/infer",
+        model="customer-agent-v1",
+        api_key="test-key",
+        sender=sender,
+        max_retries=0,
+    )
+
+    result = adapter.call_messages(
+        [{"role": "user", "content": "Summarize"}],
+        random.Random(0),
+    )
+    usage = adapter.usage_snapshot()
+
+    assert result == "part one\npart two"
+    assert usage["requests"] == 1

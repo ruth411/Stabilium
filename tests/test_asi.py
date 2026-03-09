@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from agent_stability_engine.engine.asi import ASICalculator, ASIProfile, ASIWeights
+from agent_stability_engine.engine.asi import (
+    ASICalculator,
+    ASIProfile,
+    ASIWeights,
+    ConvASICalculator,
+    ConversationWeights,
+)
 
 
 def test_asi_calculation_bounds_and_value() -> None:
@@ -28,3 +34,28 @@ def test_asi_profile_changes_weighting() -> None:
     score_balanced = balanced.calculate(0.2, 0.1, 0.1, 0.1, 0.8)
     score_strict = strict.calculate(0.2, 0.1, 0.1, 0.1, 0.8)
     assert score_strict < score_balanced
+
+
+def test_conv_asi_calculation_bounds_and_value() -> None:
+    calc = ConvASICalculator()
+    asi = calc.calculate(
+        cross_run_variance=0.2,
+        turn_contradiction_rate=0.2,
+        context_failure_rate=0.2,
+        constraint_violation_rate=0.2,
+        drift_rate=0.2,
+    )
+    assert asi == pytest.approx(80.0)
+
+
+def test_conv_asi_weights_must_sum_to_one() -> None:
+    with pytest.raises(ValueError, match="sum to 1.0"):
+        ConvASICalculator(
+            weights=ConversationWeights(
+                cross_run_variance=0.3,
+                turn_contradiction_rate=0.3,
+                context_failure_rate=0.3,
+                constraint_violation_rate=0.3,
+                drift_rate=0.3,
+            )
+        )

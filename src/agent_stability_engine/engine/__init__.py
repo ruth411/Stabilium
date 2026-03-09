@@ -5,6 +5,7 @@ from agent_stability_engine.engine.alignment import (
     GoalAlignmentResult,
     GoalSpec,
 )
+from agent_stability_engine.engine.conversation import ConversationEvaluation, ConversationEvaluator
 from agent_stability_engine.engine.drift import DriftAnalysis, DriftTracker, metrics_from_report
 from agent_stability_engine.engine.evaluator import StabilityEvaluation, StabilityEvaluator
 from agent_stability_engine.engine.pipeline import EvaluationResult, evaluate_prompt
@@ -14,6 +15,8 @@ __all__ = [
     "DriftAnalysis",
     "DriftTracker",
     "EvaluationResult",
+    "ConversationEvaluation",
+    "ConversationEvaluator",
     "GoalAlignmentDetector",
     "GoalAlignmentResult",
     "GoalSpec",

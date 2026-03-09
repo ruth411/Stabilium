@@ -95,3 +95,54 @@ class ASICalculator:
         penalty = sum(w * m for w, m in zip(self._weights.as_tuple(), all_metrics))
         asi = 100.0 * (1.0 - penalty)
         return min(max(asi, 0.0), 100.0)
+
+
+@dataclass(frozen=True)
+class ConversationWeights:
+    cross_run_variance: float
+    turn_contradiction_rate: float
+    context_failure_rate: float
+    constraint_violation_rate: float
+    drift_rate: float
+
+    def as_tuple(self) -> tuple[float, ...]:
+        return (
+            self.cross_run_variance,
+            self.turn_contradiction_rate,
+            self.context_failure_rate,
+            self.constraint_violation_rate,
+            self.drift_rate,
+        )
+
+
+DEFAULT_CONVERSATION_WEIGHTS = ConversationWeights(0.30, 0.25, 0.20, 0.15, 0.10)
+
+
+class ConvASICalculator:
+    def __init__(self, weights: ConversationWeights = DEFAULT_CONVERSATION_WEIGHTS) -> None:
+        total = sum(weights.as_tuple())
+        if abs(total - 1.0) > 1e-9:
+            msg = "ConversationWeights must sum to 1.0"
+            raise ValueError(msg)
+        self._weights = weights
+
+    def calculate(
+        self,
+        cross_run_variance: float,
+        turn_contradiction_rate: float,
+        context_failure_rate: float,
+        constraint_violation_rate: float,
+        drift_rate: float,
+    ) -> float:
+        metrics = (
+            cross_run_variance,
+            turn_contradiction_rate,
+            context_failure_rate,
+            constraint_violation_rate,
+            drift_rate,
+        )
+        if any(m < 0 or m > 1 for m in metrics):
+            msg = "all conversation metrics must be in [0, 1]"
+            raise ValueError(msg)
+        penalty = sum(w * m for w, m in zip(self._weights.as_tuple(), metrics))
+        return min(max(100.0 * (1.0 - penalty), 0.0), 100.0)
