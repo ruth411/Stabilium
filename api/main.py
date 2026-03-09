@@ -107,7 +107,7 @@ class _DBWrapper:
     def rollback(self) -> None:
         self._conn.rollback()
 
-    def __enter__(self) -> "_DBWrapper":
+    def __enter__(self) -> _DBWrapper:
         return self
 
     def __exit__(
