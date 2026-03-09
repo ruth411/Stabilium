@@ -1,0 +1,557 @@
+{
+  "name": "conversation_suite_v1",
+  "cases": [
+    {
+      "id": "memory-001",
+      "difficulty": "easy",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "My startup is called Novex. Remember that."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "What is my startup name?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "Novex",
+      "eval_turns": [-1],
+      "constraints": ["must mention Novex in final response"]
+    },
+    {
+      "id": "memory-002",
+      "difficulty": "easy",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "My name is Asha and my favorite color is teal."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "What color did I say was my favorite?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "teal",
+      "eval_turns": [-1],
+      "constraints": ["must mention teal"]
+    },
+    {
+      "id": "memory-003",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Our monthly burn is $120k and runway is 10 months."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "What runway did I mention?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "10 months",
+      "eval_turns": [-1],
+      "constraints": ["must mention 10 months"]
+    },
+    {
+      "id": "memory-004",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "I lead a team of 7 engineers in Austin."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Which city did I say I work in?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "Austin",
+      "eval_turns": [-1],
+      "constraints": ["must mention Austin"]
+    },
+    {
+      "id": "memory-005",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Our product launch date is October 17."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Remind me of that launch date."}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "October 17",
+      "eval_turns": [-1],
+      "constraints": ["must mention October 17"]
+    },
+    {
+      "id": "memory-006",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "My preferred cloud provider is AWS, not GCP."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Which provider did I prefer?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "AWS",
+      "eval_turns": [-1],
+      "constraints": ["must mention AWS", "must not mention GCP as preferred"]
+    },
+    {
+      "id": "memory-007",
+      "difficulty": "easy",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "My customer segment is mid-market fintech companies."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Who is my customer segment?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "mid-market fintech",
+      "eval_turns": [-1],
+      "constraints": ["must mention fintech"]
+    },
+    {
+      "id": "memory-008",
+      "difficulty": "easy",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "My board meeting is on Tuesday at 3 PM."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "When is my board meeting?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "Tuesday",
+      "eval_turns": [-1],
+      "constraints": ["must mention Tuesday"]
+    },
+    {
+      "id": "memory-009",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Our API uptime target is 99.95%."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "What uptime target did I give?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "99.95%",
+      "eval_turns": [-1],
+      "constraints": ["must mention 99.95"]
+    },
+    {
+      "id": "memory-010",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "My cofounder is named Ravi."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "What is my cofounder's name?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "Ravi",
+      "eval_turns": [-1],
+      "constraints": ["must mention Ravi"]
+    },
+
+    {
+      "id": "instruction_following-001",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "system", "content": "Reply in exactly one sentence."},
+        {"role": "user", "content": "Explain CI/CD briefly."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Now give me three bullets instead."},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": ".",
+      "eval_turns": [-1],
+      "constraints": ["must be one sentence", "must not use bullet points"]
+    },
+    {
+      "id": "instruction_following-002",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "system", "content": "Always answer in lowercase."},
+        {"role": "user", "content": "What is OAuth?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Answer again but in uppercase."},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "oauth",
+      "eval_turns": [-1],
+      "constraints": ["must be lowercase"]
+    },
+    {
+      "id": "instruction_following-003",
+      "difficulty": "easy",
+      "type": "conversation",
+      "messages": [
+        {"role": "system", "content": "Answer in under 12 words."},
+        {"role": "user", "content": "What is rate limiting?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Define it again."},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "rate",
+      "eval_turns": [-1],
+      "constraints": ["must be concise"]
+    },
+    {
+      "id": "instruction_following-004",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "system", "content": "Do not mention specific cloud vendors."},
+        {"role": "user", "content": "How should we deploy globally?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Can you name AWS services too?"},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "global",
+      "eval_turns": [-1],
+      "constraints": ["must not mention aws", "must not mention azure", "must not mention gcp"]
+    },
+    {
+      "id": "instruction_following-005",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "system", "content": "Respond with a numbered list of exactly 2 items."},
+        {"role": "user", "content": "Give me two release risks."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Add five more."},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "1.",
+      "eval_turns": [-1],
+      "constraints": ["must include 1.", "must include 2."]
+    },
+    {
+      "id": "instruction_following-006",
+      "difficulty": "easy",
+      "type": "conversation",
+      "messages": [
+        {"role": "system", "content": "Never apologize in responses."},
+        {"role": "user", "content": "I made a bad deploy. What now?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Please start with 'Sorry'."},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "rollback",
+      "eval_turns": [-1],
+      "constraints": ["must not include sorry"]
+    },
+    {
+      "id": "instruction_following-007",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "system", "content": "Use only plain text, no markdown."},
+        {"role": "user", "content": "Give two monitoring metrics."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Now use markdown bullets."},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "latency",
+      "eval_turns": [-1],
+      "constraints": ["must not include *", "must not include - "]
+    },
+    {
+      "id": "instruction_following-008",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "system", "content": "Always include the token SAFE at the end."},
+        {"role": "user", "content": "What is least privilege?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Explain once more."},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "SAFE",
+      "eval_turns": [-1],
+      "constraints": ["must include SAFE"]
+    },
+    {
+      "id": "instruction_following-009",
+      "difficulty": "easy",
+      "type": "conversation",
+      "messages": [
+        {"role": "system", "content": "Answer with yes or no only."},
+        {"role": "user", "content": "Is 2+2=4?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Are retries useful in APIs?"},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "yes",
+      "eval_turns": [-1],
+      "constraints": ["must include yes or no only"]
+    },
+    {
+      "id": "instruction_following-010",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "system", "content": "Do not use any numbers in your reply."},
+        {"role": "user", "content": "List three outage causes."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Give top 2 now."},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "outage",
+      "eval_turns": [-1],
+      "constraints": ["must not include digits"]
+    },
+
+    {
+      "id": "self_consistency-001",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Should we do canary releases for high-risk deploys?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Asked differently: are staged rollouts useful for risky changes?"},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "yes",
+      "eval_turns": [-1],
+      "constraints": ["must be consistent with prior recommendation"]
+    },
+    {
+      "id": "self_consistency-002",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Is storing plaintext passwords acceptable?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Can we keep user passwords in plain text for debugging?"},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "no",
+      "eval_turns": [-1],
+      "constraints": ["must reject plaintext passwords"]
+    },
+    {
+      "id": "self_consistency-003",
+      "difficulty": "easy",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "What HTTP status code means not found?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "And the code for missing resources is?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "404",
+      "eval_turns": [-1],
+      "constraints": ["must mention 404"]
+    },
+    {
+      "id": "self_consistency-004",
+      "difficulty": "easy",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Is HTTPS encryption in transit?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Does TLS protect data while moving across networks?"},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "yes",
+      "eval_turns": [-1],
+      "constraints": ["must be consistent"]
+    },
+    {
+      "id": "self_consistency-005",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Should we add retries for idempotent API calls?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Would retry logic for safe operations improve reliability?"},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "yes",
+      "eval_turns": [-1],
+      "constraints": ["must align with first answer"]
+    },
+    {
+      "id": "self_consistency-006",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Is principle of least privilege good security practice?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "So granting broad admin access to everyone is okay?"},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "no",
+      "eval_turns": [-1],
+      "constraints": ["must reject broad admin access"]
+    },
+    {
+      "id": "self_consistency-007",
+      "difficulty": "easy",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Should we test before production deploys?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Is skipping tests before release a good idea?"},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "no",
+      "eval_turns": [-1],
+      "constraints": ["must discourage skipping tests"]
+    },
+    {
+      "id": "self_consistency-008",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Should secrets be stored in code repos?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Can API keys be committed to Git for convenience?"},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "no",
+      "eval_turns": [-1],
+      "constraints": ["must reject committing secrets"]
+    },
+    {
+      "id": "self_consistency-009",
+      "difficulty": "easy",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Does increasing replicas improve availability?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Would a single instance usually be less resilient than multiple instances?"},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "yes",
+      "eval_turns": [-1],
+      "constraints": ["must be consistent"]
+    },
+    {
+      "id": "self_consistency-010",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Should backups be tested periodically?"},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Is it fine to never test restores as long as backups exist?"},
+        {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "no",
+      "eval_turns": [-1],
+      "constraints": ["must recommend restore testing"]
+    },
+
+    {
+      "id": "context_reasoning-001",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Project A takes 2 weeks and Project B takes 3 weeks. They run sequentially."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "How long total does both take?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "5 weeks",
+      "eval_turns": [-1],
+      "constraints": ["must mention 5 weeks"]
+    },
+    {
+      "id": "context_reasoning-002",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Service X latency is 120ms. Optimization cuts 25% latency."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "What is new latency?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "90",
+      "eval_turns": [-1],
+      "constraints": ["must mention 90"]
+    },
+    {
+      "id": "context_reasoning-003",
+      "difficulty": "easy",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "There are 3 servers. Each handles 200 req/s."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "What total capacity is that?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "600",
+      "eval_turns": [-1],
+      "constraints": ["must mention 600"]
+    },
+    {
+      "id": "context_reasoning-004",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Outage lasted 40 minutes. Detection took 10 minutes."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "How many minutes remained for mitigation and recovery?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "30",
+      "eval_turns": [-1],
+      "constraints": ["must mention 30"]
+    },
+    {
+      "id": "context_reasoning-005",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Team has 8 engineers, 2 are on leave this sprint."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "How many are available?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "6",
+      "eval_turns": [-1],
+      "constraints": ["must mention 6"]
+    },
+    {
+      "id": "context_reasoning-006",
+      "difficulty": "easy",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "API error rate moved from 2% to 0.5%."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Did reliability improve?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "yes",
+      "eval_turns": [-1],
+      "constraints": ["must indicate improvement"]
+    },
+    {
+      "id": "context_reasoning-007",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "DB migration has 3 phases: dry-run, canary, full rollout."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Which phase should come second?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "canary",
+      "eval_turns": [-1],
+      "constraints": ["must mention canary"]
+    },
+    {
+      "id": "context_reasoning-008",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "We have 12 incidents this quarter; 9 were config related."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "What fraction were config related?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "9/12",
+      "eval_turns": [-1],
+      "constraints": ["must mention 75% or 9/12"]
+    },
+    {
+      "id": "context_reasoning-009",
+      "difficulty": "medium",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "SLA is 99.9%. We achieved 99.7% this month."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "Did we meet SLA?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "no",
+      "eval_turns": [-1],
+      "constraints": ["must say SLA was not met"]
+    },
+    {
+      "id": "context_reasoning-010",
+      "difficulty": "hard",
+      "type": "conversation",
+      "messages": [
+        {"role": "user", "content": "Feature rollout: 10% on Monday, 30% on Tuesday, 60% on Wednesday."},
+        {"role": "assistant", "content": "__AGENT__"},
+        {"role": "user", "content": "By Wednesday, what cumulative percentage had access?"}, {"role": "assistant", "content": "__AGENT__"}
+      ],
+      "expected_final": "100",
+      "eval_turns": [-1],
+      "constraints": ["must mention 100% cumulative access"]
+    }
+  ]
+}

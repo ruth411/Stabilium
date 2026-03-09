@@ -40,6 +40,7 @@ from agent_stability_engine.engine.embeddings import EmbeddingProvider
 from agent_stability_engine.report.export import build_export_bundle
 from agent_stability_engine.report.pdf_renderer import write_compliance_pdf
 from agent_stability_engine.runners.benchmark import run_benchmark_suite
+from agent_stability_engine.runners.conversation_benchmark import run_conversation_benchmark_suite
 
 BASE_DIR = Path(__file__).parent.parent
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -457,6 +458,7 @@ def _sanitize_error_message(message: str, api_key: str) -> str:
 def _run_benchmark_report(
     *,
     suite_path: Path,
+    job_type: str,
     provider: str,
     model: str,
     api_key: str,
@@ -498,18 +500,36 @@ def _run_benchmark_report(
             except Exception:  # noqa: BLE001
                 pass  # never let progress tracking crash the benchmark
 
-    result = run_benchmark_suite(
-        suite_path=suite_path,
-        agent_fn=agent,
-        run_count=run_count,
-        seed=seed,
-        embedding_provider=EmbeddingProvider.HASH,
-        max_cases=max_cases,
-        workers=workers,
-        agent_factory=agent_factory,
-        progress_callback=progress_callback,
-    )
-    return result.report
+    if job_type == "benchmark":
+        result = run_benchmark_suite(
+            suite_path=suite_path,
+            agent_fn=agent,
+            run_count=run_count,
+            seed=seed,
+            embedding_provider=EmbeddingProvider.HASH,
+            max_cases=max_cases,
+            workers=workers,
+            agent_factory=agent_factory,
+            progress_callback=progress_callback,
+        )
+        return result.report
+
+    if job_type == "conversation_benchmark":
+        result = run_conversation_benchmark_suite(
+            suite_path=suite_path,
+            adapter=agent,
+            run_count=run_count,
+            seed=seed,
+            embedding_provider=EmbeddingProvider.HASH,
+            max_cases=max_cases,
+            workers=workers,
+            agent_factory=agent_factory,
+            progress_callback=progress_callback,
+        )
+        return result.report
+
+    msg = f"job_type '{job_type}' is not enabled yet"
+    raise RuntimeError(msg)
 
 
 def _with_watchdog_metadata(
@@ -603,11 +623,9 @@ def _run_job_worker(
     Runs in a subprocess. DATABASE_URL is inherited from the parent environment.
     """
     try:
-        if job_type != "benchmark":
-            msg = f"job_type '{job_type}' is not enabled in Stage 0"
-            raise RuntimeError(msg)
         report = _run_benchmark_report(
             suite_path=Path(suite_path),
+            job_type=job_type,
             provider=provider,
             model=model,
             api_key=api_key,
@@ -927,13 +945,10 @@ def create_job(
         validate_job_contract(job_type=req.job_type, fault_rate=req.fault_rate)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if req.job_type != DEFAULT_JOB_TYPE:
+    if req.job_type == "agent_benchmark":
         raise HTTPException(
             status_code=501,
-            detail=(
-                f"job_type '{req.job_type}' is part of the locked Stage 0 contract "
-                "but not enabled yet"
-            ),
+            detail=(f"job_type '{req.job_type}' is not enabled yet"),
         )
     custom_endpoint = _validate_custom_endpoint(req.provider, req.custom_endpoint)
     api_key = req.api_key.strip()
@@ -1131,6 +1146,7 @@ def evaluate(req: EvaluateRequest) -> EvaluateResponse:
     try:
         report = _run_benchmark_report(
             suite_path=suite_path,
+            job_type="benchmark",
             provider=req.provider,
             model=req.model.strip(),
             api_key=api_key,

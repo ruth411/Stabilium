@@ -31,3 +31,7 @@ def test_validate_job_contract_rejects_fault_rate_for_non_agent() -> None:
 
 def test_validate_job_contract_accepts_agent_fault_rate() -> None:
     validate_job_contract(job_type="agent_benchmark", fault_rate=0.2)
+
+
+def test_validate_job_contract_accepts_conversation_without_fault_rate() -> None:
+    validate_job_contract(job_type="conversation_benchmark", fault_rate=0.0)
