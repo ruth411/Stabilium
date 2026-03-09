@@ -141,7 +141,8 @@ def _connect_db() -> _DBWrapper:
 
 def _init_db() -> None:
     with _connect_db() as conn:
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL DEFAULT '',
@@ -151,16 +152,20 @@ def _init_db() -> None:
                 password_hash TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
-            """)
-        conn.execute("""
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL
             )
-            """)
-        conn.execute("""
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -182,7 +187,8 @@ def _init_db() -> None:
                 result_json TEXT,
                 completed_cases INTEGER NOT NULL DEFAULT 0
             )
-            """)
+            """
+        )
         # Idempotent migrations for pre-existing databases
         conn.execute(
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_cases INTEGER NOT NULL DEFAULT 0"
