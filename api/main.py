@@ -8,6 +8,7 @@ import os
 import secrets
 import sys
 import threading
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -219,6 +220,7 @@ class JobCreateRequest(BaseModel):
     run_count: int = Field(default=3, ge=1, le=10)
     max_cases: int = Field(default=5, ge=1, le=100)
     seed: int = 42
+    workers: int = Field(default=3, ge=1, le=10)
 
 
 class JobSummary(BaseModel):
@@ -419,6 +421,7 @@ def _run_benchmark_report(
     max_cases: int,
     seed: int,
     job_id: str | None = None,
+    workers: int = 1,
 ) -> dict[str, object]:
     agent = _build_agent(
         provider=provider,
@@ -426,6 +429,15 @@ def _run_benchmark_report(
         api_key=api_key,
         custom_endpoint=custom_endpoint,
     )
+
+    # When workers > 1, give each worker its own adapter instance so API calls
+    # across cases happen truly in parallel (no shared-state lock needed).
+    agent_factory: Callable[[], Callable[..., str]] | None = None
+    if workers > 1:
+        _p, _m, _k, _e = provider, model, api_key, custom_endpoint
+
+        def agent_factory() -> Callable[..., str]:
+            return _build_agent(provider=_p, model=_m, api_key=_k, custom_endpoint=_e)
 
     progress_callback = None
     if job_id is not None:
@@ -449,7 +461,8 @@ def _run_benchmark_report(
         seed=seed,
         embedding_provider=EmbeddingProvider.HASH,
         max_cases=max_cases,
-        workers=1,
+        workers=workers,
+        agent_factory=agent_factory,
         progress_callback=progress_callback,
     )
     return result.report
@@ -536,6 +549,7 @@ def _run_job_worker(
     seed: int,
     job_id: str,
     started_at: str,
+    workers: int = 1,
 ) -> None:
     """Run the benchmark and write the result directly to PostgreSQL.
 
@@ -551,6 +565,7 @@ def _run_job_worker(
             max_cases=max_cases,
             seed=seed,
             job_id=job_id,
+            workers=workers,
         )
         finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         final_report = _with_watchdog_metadata(
@@ -617,6 +632,7 @@ def _run_job(
     run_count: int,
     max_cases: int,
     seed: int,
+    workers: int = 1,
 ) -> None:
     started_at = _utc_now_iso()
     with _connect_db() as conn:
@@ -641,6 +657,7 @@ def _run_job(
             "seed": seed,
             "job_id": job_id,
             "started_at": started_at,
+            "workers": workers,
         },
         daemon=True,
     )
@@ -698,6 +715,7 @@ def _spawn_job(
     run_count: int,
     max_cases: int,
     seed: int,
+    workers: int = 1,
 ) -> None:
     thread = threading.Thread(
         target=_run_job,
@@ -710,6 +728,7 @@ def _spawn_job(
             "run_count": run_count,
             "max_cases": max_cases,
             "seed": seed,
+            "workers": workers,
         },
         daemon=True,
     )
@@ -881,6 +900,7 @@ def create_job(
         run_count=req.run_count,
         max_cases=req.max_cases,
         seed=req.seed,
+        workers=req.workers,
     )
     return _row_to_job_summary(row)
 
