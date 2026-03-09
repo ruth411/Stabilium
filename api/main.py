@@ -30,13 +30,18 @@ from agent_stability_engine.adapters import (
     CustomEndpointAdapter,
     OpenAIChatAdapter,
 )
+from agent_stability_engine.contracts import (
+    DEFAULT_JOB_TYPE,
+    DEFAULT_SUITE,
+    resolve_suite_path,
+    validate_job_contract,
+)
 from agent_stability_engine.engine.embeddings import EmbeddingProvider
 from agent_stability_engine.report.export import build_export_bundle
 from agent_stability_engine.report.pdf_renderer import write_compliance_pdf
 from agent_stability_engine.runners.benchmark import run_benchmark_suite
 
 BASE_DIR = Path(__file__).parent.parent
-SUITE_PATH = BASE_DIR / "examples" / "benchmarks" / "large_suite.json"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 SESSION_TTL_HOURS = int(os.getenv("ASE_API_SESSION_TTL_HOURS", "168"))
 WATCHDOG_TIMEOUT_SECONDS = int(os.getenv("ASE_WATCHDOG_TIMEOUT_SECONDS", "3600"))
@@ -136,8 +141,7 @@ def _connect_db() -> _DBWrapper:
 
 def _init_db() -> None:
     with _connect_db() as conn:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL DEFAULT '',
@@ -147,25 +151,25 @@ def _init_db() -> None:
                 password_hash TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 provider TEXT NOT NULL,
                 model TEXT NOT NULL,
+                suite TEXT NOT NULL DEFAULT 'examples/benchmarks/large_suite.json',
+                job_type TEXT NOT NULL DEFAULT 'benchmark',
+                fault_rate DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                workers INTEGER NOT NULL DEFAULT 1,
                 run_count INTEGER NOT NULL,
                 max_cases INTEGER NOT NULL,
                 seed INTEGER NOT NULL,
@@ -178,12 +182,23 @@ def _init_db() -> None:
                 result_json TEXT,
                 completed_cases INTEGER NOT NULL DEFAULT 0
             )
-            """
-        )
+            """)
         # Idempotent migrations for pre-existing databases
         conn.execute(
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_cases INTEGER NOT NULL DEFAULT 0"
         )
+        conn.execute(
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS suite TEXT NOT NULL DEFAULT "
+            "'examples/benchmarks/large_suite.json'"
+        )
+        conn.execute(
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_type TEXT NOT NULL DEFAULT 'benchmark'"
+        )
+        conn.execute(
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS fault_rate "
+            "DOUBLE PRECISION NOT NULL DEFAULT 0.0"
+        )
+        conn.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS workers INTEGER NOT NULL DEFAULT 1")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT ''")
 
 
@@ -217,6 +232,9 @@ class JobCreateRequest(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     custom_endpoint: str | None = Field(default=None, max_length=2048)
     api_key: str = Field(min_length=1, max_length=2048)
+    suite: str = Field(default=DEFAULT_SUITE, min_length=1, max_length=512)
+    job_type: Literal["benchmark", "conversation_benchmark", "agent_benchmark"] = DEFAULT_JOB_TYPE
+    fault_rate: float = Field(default=0.0, ge=0.0, le=0.5)
     run_count: int = Field(default=3, ge=1, le=10)
     max_cases: int = Field(default=5, ge=1, le=100)
     seed: int = 42
@@ -228,6 +246,10 @@ class JobSummary(BaseModel):
     status: Literal["queued", "running", "completed", "failed", "cancelled"]
     provider: str
     model: str
+    suite: str
+    job_type: str
+    fault_rate: float
+    workers: int
     run_count: int
     max_cases: int
     seed: int
@@ -255,6 +277,7 @@ class EvaluateRequest(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     custom_endpoint: str | None = Field(default=None, max_length=2048)
     api_key: str = Field(min_length=1, max_length=2048)
+    suite: str = Field(default=DEFAULT_SUITE, min_length=1, max_length=512)
     run_count: int = Field(default=3, ge=1, le=10)
     max_cases: int = Field(default=5, ge=1, le=100)
     seed: int = 42
@@ -298,12 +321,26 @@ def _row_to_job_summary(row: psycopg2.extras.RealDictRow) -> JobSummary:
 
     raw_completed = row["completed_cases"]
     completed_cases = int(raw_completed) if raw_completed is not None else 0
+    raw_fault_rate = row.get("fault_rate", 0.0)
+    fault_rate = float(raw_fault_rate) if isinstance(raw_fault_rate, (int, float)) else 0.0
+    raw_workers = row.get("workers", 1)
+    workers = int(raw_workers) if isinstance(raw_workers, (int, float)) else 1
+    raw_suite = row.get("suite")
+    suite = str(raw_suite) if isinstance(raw_suite, str) and raw_suite else DEFAULT_SUITE
+    raw_job_type = row.get("job_type")
+    job_type = (
+        str(raw_job_type) if isinstance(raw_job_type, str) and raw_job_type else DEFAULT_JOB_TYPE
+    )
 
     return JobSummary(
         id=str(row["id"]),
         status=str(row["status"]),
         provider=str(row["provider"]),
         model=str(row["model"]),
+        suite=suite,
+        job_type=job_type,
+        fault_rate=fault_rate,
+        workers=workers,
         run_count=int(row["run_count"]),
         max_cases=int(row["max_cases"]),
         seed=int(row["seed"]),
@@ -413,6 +450,7 @@ def _sanitize_error_message(message: str, api_key: str) -> str:
 
 def _run_benchmark_report(
     *,
+    suite_path: Path,
     provider: str,
     model: str,
     api_key: str,
@@ -455,7 +493,7 @@ def _run_benchmark_report(
                 pass  # never let progress tracking crash the benchmark
 
     result = run_benchmark_suite(
-        suite_path=SUITE_PATH,
+        suite_path=suite_path,
         agent_fn=agent,
         run_count=run_count,
         seed=seed,
@@ -540,10 +578,13 @@ def _build_failure_report(
 
 def _run_job_worker(
     *,
+    suite_path: str,
     provider: str,
     model: str,
     api_key: str,
     custom_endpoint: str | None,
+    job_type: str,
+    fault_rate: float,
     run_count: int,
     max_cases: int,
     seed: int,
@@ -556,7 +597,11 @@ def _run_job_worker(
     Runs in a subprocess. DATABASE_URL is inherited from the parent environment.
     """
     try:
+        if job_type != "benchmark":
+            msg = f"job_type '{job_type}' is not enabled in Stage 0"
+            raise RuntimeError(msg)
         report = _run_benchmark_report(
+            suite_path=Path(suite_path),
             provider=provider,
             model=model,
             api_key=api_key,
@@ -600,6 +645,8 @@ def _run_job_worker(
             reason=message,
             watchdog_triggered=False,
         )
+        failure_report["job_type"] = job_type
+        failure_report["fault_rate"] = fault_rate
         try:
             with _connect_db() as conn:
                 conn.execute(
@@ -625,10 +672,13 @@ def _run_job_worker(
 def _run_job(
     *,
     job_id: str,
+    suite_path: str,
     provider: str,
     model: str,
     api_key: str,
     custom_endpoint: str | None,
+    job_type: str,
+    fault_rate: float,
     run_count: int,
     max_cases: int,
     seed: int,
@@ -648,10 +698,13 @@ def _run_job(
     process = multiprocessing.Process(
         target=_run_job_worker,
         kwargs={
+            "suite_path": suite_path,
             "provider": provider,
             "model": model,
             "api_key": api_key,
             "custom_endpoint": custom_endpoint,
+            "job_type": job_type,
+            "fault_rate": fault_rate,
             "run_count": run_count,
             "max_cases": max_cases,
             "seed": seed,
@@ -693,6 +746,8 @@ def _run_job(
         reason=reason,
         watchdog_triggered=True,
     )
+    failure_report["job_type"] = job_type
+    failure_report["fault_rate"] = fault_rate
     with _connect_db() as conn:
         conn.execute(
             """
@@ -708,10 +763,13 @@ def _run_job(
 def _spawn_job(
     *,
     job_id: str,
+    suite_path: str,
     provider: str,
     model: str,
     api_key: str,
     custom_endpoint: str | None,
+    job_type: str,
+    fault_rate: float,
     run_count: int,
     max_cases: int,
     seed: int,
@@ -721,10 +779,13 @@ def _spawn_job(
         target=_run_job,
         kwargs={
             "job_id": job_id,
+            "suite_path": suite_path,
             "provider": provider,
             "model": model,
             "api_key": api_key,
             "custom_endpoint": custom_endpoint,
+            "job_type": job_type,
+            "fault_rate": fault_rate,
             "run_count": run_count,
             "max_cases": max_cases,
             "seed": seed,
@@ -852,8 +913,22 @@ def create_job(
     req: JobCreateRequest,
     user: Annotated[UserPublic, Depends(_require_user)],
 ) -> JobSummary:
-    if not SUITE_PATH.exists():
-        raise HTTPException(status_code=500, detail="benchmark suite missing on server")
+    try:
+        suite_path = resolve_suite_path(base_dir=BASE_DIR, suite=req.suite)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        validate_job_contract(job_type=req.job_type, fault_rate=req.fault_rate)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if req.job_type != DEFAULT_JOB_TYPE:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                f"job_type '{req.job_type}' is part of the locked Stage 0 contract "
+                "but not enabled yet"
+            ),
+        )
     custom_endpoint = _validate_custom_endpoint(req.provider, req.custom_endpoint)
     api_key = req.api_key.strip()
     if not api_key:
@@ -865,16 +940,21 @@ def create_job(
         conn.execute(
             """
             INSERT INTO jobs (
-                id, user_id, provider, model, run_count, max_cases, seed,
+                id, user_id, provider, model, suite, job_type, fault_rate, workers,
+                run_count, max_cases, seed,
                 status, created_at, updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 job_id,
                 user.id,
                 req.provider,
                 req.model.strip(),
+                str(suite_path.relative_to(BASE_DIR)),
+                req.job_type,
+                req.fault_rate,
+                req.workers,
                 req.run_count,
                 req.max_cases,
                 req.seed,
@@ -893,10 +973,13 @@ def create_job(
 
     _spawn_job(
         job_id=job_id,
+        suite_path=str(suite_path),
         provider=req.provider,
         model=req.model.strip(),
         api_key=api_key,
         custom_endpoint=custom_endpoint,
+        job_type=req.job_type,
+        fault_rate=req.fault_rate,
         run_count=req.run_count,
         max_cases=req.max_cases,
         seed=req.seed,
@@ -1030,8 +1113,10 @@ def get_job_report_pdf(
 
 @app.post("/evaluate", response_model=EvaluateResponse)
 def evaluate(req: EvaluateRequest) -> EvaluateResponse:
-    if not SUITE_PATH.exists():
-        raise HTTPException(status_code=500, detail="benchmark suite missing on server")
+    try:
+        suite_path = resolve_suite_path(base_dir=BASE_DIR, suite=req.suite)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     custom_endpoint = _validate_custom_endpoint(req.provider, req.custom_endpoint)
     api_key = req.api_key.strip()
     if not api_key:
@@ -1039,6 +1124,7 @@ def evaluate(req: EvaluateRequest) -> EvaluateResponse:
 
     try:
         report = _run_benchmark_report(
+            suite_path=suite_path,
             provider=req.provider,
             model=req.model.strip(),
             api_key=api_key,
