@@ -37,6 +37,7 @@ from agent_stability_engine.engine.asi import ASIProfile
 from agent_stability_engine.engine.embeddings import EmbeddingProvider
 from agent_stability_engine.engine.stats import compare_sample_means
 from agent_stability_engine.runners.benchmark import run_benchmark_suite
+from agent_stability_engine.runners.conversation_benchmark import run_conversation_benchmark_suite
 
 # ---------------------------------------------------------------------------
 # Progress bar
@@ -86,6 +87,24 @@ def _demo_agent(prompt: str, rng: random.Random | None = None) -> str:
     )
 
 
+class _DemoAdapter:
+    """Demo adapter that supports both single-turn and conversation interfaces."""
+
+    def __call__(self, prompt: str, rng: random.Random | None = None) -> str:
+        return _demo_agent(prompt, rng)
+
+    def call_messages(
+        self,
+        messages: list[dict[str, str]],
+        rng: random.Random | None = None,
+    ) -> str:
+        user_messages = [m["content"] for m in messages if m.get("role") == "user"]
+        prompt = (
+            user_messages[-1] if user_messages else (messages[-1]["content"] if messages else "")
+        )
+        return _demo_agent(prompt, rng)
+
+
 def _parse_model_spec(spec: str) -> tuple[str, float | None]:
     """Parse 'gpt-4o-mini@0.5' into ('gpt-4o-mini', 0.5). No '@' → temperature=None."""
     if "@" in spec:
@@ -100,7 +119,7 @@ def _build_agent(
     anthropic_key: str | None,
 ) -> Callable[..., str]:
     if model_spec == "demo":
-        return _demo_agent
+        return _DemoAdapter()
     model_name, temperature = _parse_model_spec(model_spec)
     if model_name.startswith("claude-"):
         return AnthropicChatAdapter(
@@ -156,8 +175,58 @@ def _extract_metrics(benchmark_report: dict[str, object]) -> dict[str, float]:
     return {k: round(v / count, 4) for k, v in sums.items()}
 
 
-def _extract_case_asi_values(benchmark_report: dict[str, object]) -> list[float]:
-    raw_values = benchmark_report.get("case_asi_values")
+def _extract_conversation_metrics(benchmark_report: dict[str, object]) -> dict[str, float]:
+    """Pull per-metric means from a conversation benchmark report."""
+    cases = benchmark_report.get("cases", [])
+    if not isinstance(cases, list) or not cases:
+        return {}
+
+    sums: dict[str, float] = {
+        "agent_stability_index": 0.0,
+        "conv_asi": 0.0,
+        "cross_run_variance": 0.0,
+        "turn_contradiction_rate": 0.0,
+        "context_failure_rate": 0.0,
+        "constraint_violation_rate": 0.0,
+        "drift_rate": 0.0,
+    }
+    count = 0
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        report = case.get("report", {})
+        if not isinstance(report, dict):
+            continue
+        metrics = report.get("metrics", {})
+        if not isinstance(metrics, dict):
+            continue
+        conv_asi = float(metrics.get("conv_asi", 0))
+        sums["agent_stability_index"] += conv_asi
+        sums["conv_asi"] += conv_asi
+        sums["cross_run_variance"] += float(metrics.get("cross_run_variance", 0))
+        sums["turn_contradiction_rate"] += float(metrics.get("turn_contradiction_rate", 0))
+        sums["context_failure_rate"] += float(metrics.get("context_failure_rate", 0))
+        sums["constraint_violation_rate"] += float(metrics.get("constraint_violation_rate", 0))
+        sums["drift_rate"] += float(metrics.get("drift_rate", 0))
+        count += 1
+
+    if count == 0:
+        return {}
+    return {k: round(v / count, 4) for k, v in sums.items()}
+
+
+def _extract_mode_metrics(benchmark_report: dict[str, object], mode: str) -> dict[str, float]:
+    if mode == "conversation":
+        return _extract_conversation_metrics(benchmark_report)
+    return _extract_metrics(benchmark_report)
+
+
+def _extract_case_asi_values(benchmark_report: dict[str, object], mode: str) -> list[float]:
+    raw_values = (
+        benchmark_report.get("case_conv_asi_values")
+        if mode == "conversation"
+        else benchmark_report.get("case_asi_values")
+    )
     if not isinstance(raw_values, list):
         return []
     values: list[float] = []
@@ -223,6 +292,8 @@ def _generate_markdown(comparison: dict[str, object]) -> str:
     run_count = comparison.get("run_count")
     generated_at = comparison.get("generated_at")
     num_cases = comparison.get("num_cases", "?")
+    mode = str(comparison.get("mode", "single"))
+    is_conversation = mode == "conversation"
 
     sorted_models = sorted(
         models.items(),
@@ -234,31 +305,58 @@ def _generate_markdown(comparison: dict[str, object]) -> str:
         "# ASE Model Stability Comparison",
         "",
         f"**Suite:** `{suite}`  ",
+        f"**Mode:** `{mode}`  ",
         f"**Cases:** {num_cases}  ",
         f"**Runs per case:** {run_count}  ",
         f"**Generated:** {generated_at}",
         "",
         "## Results",
         "",
-        "| Rank | Model | ASI | ASI 95% CI | Variance | Contradiction | Mutation Δ | Tool Misuse |",
-        "|------|-------|-----|------------|----------|---------------|------------|-------------|",
+        (
+            "| Rank | Model | ConvASI | ConvASI 95% CI | Cross-Run Variance | "
+            "Turn Contradiction | Context Failure | Constraint Violation | Drift |"
+            if is_conversation
+            else (
+                "| Rank | Model | ASI | ASI 95% CI | Variance | "
+                "Contradiction | Mutation Δ | Tool Misuse |"
+            )
+        ),
+        (
+            "|------|-------|---------|----------------|--------------------|"
+            "--------------------|----------------|----------------------|-------|"
+            if is_conversation
+            else (
+                "|------|-------|-----|------------|----------|"
+                "---------------|------------|-------------|"
+            )
+        ),
     ]
 
     for rank, (model, m) in enumerate(sorted_models, 1):
         asi = float(m.get("agent_stability_index", 0.0))
-        var = float(m.get("semantic_variance", 0.0))
-        contra = float(m.get("contradiction_rate", 0.0))
-        mut = float(m.get("mutation_degradation", 0.0))
-        tool = float(m.get("tool_misuse_frequency", 0.0))
         ci_low_obj = m.get("asi_ci95_low")
         ci_high_obj = m.get("asi_ci95_high")
         ci_low = float(ci_low_obj) if isinstance(ci_low_obj, (int, float)) else None
         ci_high = float(ci_high_obj) if isinstance(ci_high_obj, (int, float)) else None
         ci_text = "—" if ci_low is None or ci_high is None else f"[{ci_low:.1f}, {ci_high:.1f}]"
-        row = (
-            f"| {rank} | `{model}` | **{asi:.1f}**"
-            f" | {ci_text} | {var:.4f} | {contra:.4f} | {mut:.4f} | {tool:.4f} |"
-        )
+        if is_conversation:
+            row = (
+                f"| {rank} | `{model}` | **{asi:.1f}** | {ci_text} | "
+                f"{float(m.get('cross_run_variance', 0.0)):.4f} | "
+                f"{float(m.get('turn_contradiction_rate', 0.0)):.4f} | "
+                f"{float(m.get('context_failure_rate', 0.0)):.4f} | "
+                f"{float(m.get('constraint_violation_rate', 0.0)):.4f} | "
+                f"{float(m.get('drift_rate', 0.0)):.4f} |"
+            )
+        else:
+            var = float(m.get("semantic_variance", 0.0))
+            contra = float(m.get("contradiction_rate", 0.0))
+            mut = float(m.get("mutation_degradation", 0.0))
+            tool = float(m.get("tool_misuse_frequency", 0.0))
+            row = (
+                f"| {rank} | `{model}` | **{asi:.1f}**"
+                f" | {ci_text} | {var:.4f} | {contra:.4f} | {mut:.4f} | {tool:.4f} |"
+            )
         lines.append(row)
 
     # --- Domain breakdown ---
@@ -320,11 +418,25 @@ def _generate_markdown(comparison: dict[str, object]) -> str:
         "",
         "| Metric | Range | Better when |",
         "|--------|-------|-------------|",
-        "| **ASI** (Agent Stability Index) | 0–100 | Higher |",
-        "| **Variance** | 0–1 | Lower — consistent outputs across identical prompts |",
-        "| **Contradiction Rate** | 0–1 | Lower — model doesn't contradict itself |",
-        "| **Mutation Degradation** | 0–1 | Lower — robust to prompt perturbations |",
-        "| **Tool Misuse** | 0–1 | Lower — correct tool usage |",
+    ]
+    if is_conversation:
+        lines += [
+            "| **ConvASI** (Conversation ASI) | 0–100 | Higher |",
+            "| **Cross-Run Variance** | 0–1 | Lower — stable final responses across runs |",
+            "| **Turn Contradiction Rate** | 0–1 | Lower — fewer contradictions across turns |",
+            "| **Context Failure Rate** | 0–1 | Lower — better memory/context retention |",
+            "| **Constraint Violation Rate** | 0–1 | Lower — better instruction adherence |",
+            "| **Drift Rate** | 0–1 | Lower — less behavior drift over turns |",
+        ]
+    else:
+        lines += [
+            "| **ASI** (Agent Stability Index) | 0–100 | Higher |",
+            "| **Variance** | 0–1 | Lower — consistent outputs across identical prompts |",
+            "| **Contradiction Rate** | 0–1 | Lower — model doesn't contradict itself |",
+            "| **Mutation Degradation** | 0–1 | Lower — robust to prompt perturbations |",
+            "| **Tool Misuse** | 0–1 | Lower — correct tool usage |",
+        ]
+    lines += [
         "",
         "## Key Findings",
         "",
@@ -385,8 +497,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--suite",
-        default="examples/benchmarks/default_suite.json",
-        help="Path to benchmark suite JSON",
+        default=None,
+        help="Path to benchmark suite JSON (defaults by mode)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["single", "conversation"],
+        default="single",
+        help="Validation mode: single-turn ASI or conversation ConvASI",
     )
     parser.add_argument("--run-count", type=int, default=3, help="Runs per case")
     parser.add_argument("--seed", type=int, default=42)
@@ -426,7 +544,12 @@ def main() -> int:
         return 1
 
     profile = ASIProfile(args.asi_profile)
-    suite_path = Path(args.suite)
+    if args.suite is not None:
+        suite_path = Path(args.suite)
+    elif args.mode == "conversation":
+        suite_path = Path("examples/benchmarks/conversation_suite.json")
+    else:
+        suite_path = Path("examples/benchmarks/default_suite.json")
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -434,6 +557,7 @@ def main() -> int:
     print("  ASE Model Stability Validation Study")
     print("=" * 60)
     print(f"  Suite:      {suite_path}")
+    print(f"  Mode:       {args.mode}")
     print(f"  Models:     {', '.join(args.models)}")
     print(f"  Runs/case:  {args.run_count}")
     print(f"  Profile:    {args.asi_profile}")
@@ -450,19 +574,32 @@ def main() -> int:
         agent_fn = agent_factory()
         _start = time.monotonic()
 
-        result = run_benchmark_suite(
-            suite_path=suite_path,
-            agent_fn=agent_fn,
-            run_count=args.run_count,
-            seed=args.seed,
-            asi_profile=profile,
-            mutation_sample_limit=args.mutation_limit,
-            embedding_provider=EmbeddingProvider(args.embedding_provider),
-            max_cases=args.max_cases,
-            workers=args.workers,
-            progress_callback=_make_progress_callback(model, 0, _start),
-            agent_factory=agent_factory if args.workers > 1 else None,
-        )
+        if args.mode == "conversation":
+            result = run_conversation_benchmark_suite(
+                suite_path=suite_path,
+                adapter=agent_fn,
+                run_count=args.run_count,
+                seed=args.seed,
+                embedding_provider=EmbeddingProvider(args.embedding_provider),
+                max_cases=args.max_cases,
+                workers=args.workers,
+                progress_callback=_make_progress_callback(model, 0, _start),
+                agent_factory=agent_factory if args.workers > 1 else None,
+            )
+        else:
+            result = run_benchmark_suite(
+                suite_path=suite_path,
+                agent_fn=agent_fn,
+                run_count=args.run_count,
+                seed=args.seed,
+                asi_profile=profile,
+                mutation_sample_limit=args.mutation_limit,
+                embedding_provider=EmbeddingProvider(args.embedding_provider),
+                max_cases=args.max_cases,
+                workers=args.workers,
+                progress_callback=_make_progress_callback(model, 0, _start),
+                agent_factory=agent_factory if args.workers > 1 else None,
+            )
 
         report = result.report
         num_cases = int(report.get("num_cases", 0))
@@ -472,8 +609,12 @@ def main() -> int:
         model_path = output_dir / f"{safe_name}.json"
         model_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
 
-        metrics = _extract_metrics(report)
-        asi_statistics = report.get("asi_statistics")
+        metrics = _extract_mode_metrics(report, args.mode)
+        asi_statistics = (
+            report.get("conv_asi_statistics")
+            if args.mode == "conversation"
+            else report.get("asi_statistics")
+        )
         if isinstance(asi_statistics, dict):
             ci_low = asi_statistics.get("ci_low")
             ci_high = asi_statistics.get("ci_high")
@@ -487,12 +628,16 @@ def main() -> int:
         domain_scores = report.get("domain_scores", {})
         if isinstance(domain_scores, dict):
             metrics["_domains"] = domain_scores
-        all_case_asi[model] = _extract_case_asi_values(report)
+        all_case_asi[model] = _extract_case_asi_values(report, args.mode)
         all_metrics[model] = metrics
 
         asi = metrics.get("agent_stability_index", report.get("mean_asi", 0))
         asi_float = float(asi) if isinstance(asi, (int, float)) else 0.0
-        print(f"[{model}] ASI = {asi_float:.1f}  |  cases={num_cases}  →  saved {model_path.name}")
+        label = "ConvASI" if args.mode == "conversation" else "ASI"
+        print(
+            f"[{model}] {label} = {asi_float:.1f}  |  "
+            f"cases={num_cases}  →  saved {model_path.name}"
+        )
 
     pairwise_significance = _pairwise_significance(all_case_asi)
 
@@ -504,6 +649,7 @@ def main() -> int:
         "seed": args.seed,
         "asi_profile": args.asi_profile,
         "mutation_limit": args.mutation_limit,
+        "mode": args.mode,
         "num_cases": num_cases,
         "models": all_metrics,
         "pairwise_significance": pairwise_significance,
