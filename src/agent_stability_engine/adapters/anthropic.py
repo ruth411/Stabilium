@@ -154,6 +154,70 @@ class AnthropicChatAdapter:
         msg = "unreachable retry state"
         raise RuntimeError(msg)
 
+    def call_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+        rng: random.Random | None = None,
+    ) -> tuple[list[dict[str, object]], str | None]:
+        """One Anthropic Messages call with tool definitions.
+
+        Converts OpenAI-schema tools to Anthropic format (parameters → input_schema).
+
+        Returns:
+            (tool_use_blocks, None)  — model wants to invoke tools.
+            ([], final_text)         — model produced a final answer.
+        """
+        anthropic_tools: list[dict[str, object]] = [
+            {
+                "name": t.get("name", ""),
+                "description": t.get("description", ""),
+                "input_schema": t.get("parameters", {}),
+            }
+            for t in tools
+        ]
+
+        system_chunks: list[str] = []
+        filtered_messages: list[dict[str, object]] = []
+        for m in messages:
+            role = m.get("role", "")
+            content = m.get("content", "")
+            if role == "system" and isinstance(content, str):
+                system_chunks.append(content)
+            else:
+                filtered_messages.append(m)
+
+        payload: dict[str, object] = {
+            "model": self._model,
+            "max_tokens": self._max_tokens,
+            "messages": filtered_messages,
+            "tools": anthropic_tools,
+        }
+        if system_chunks:
+            payload["system"] = "\n\n".join(system_chunks)
+        if self._temperature is not None:
+            payload["temperature"] = self._temperature
+
+        attempts = self._max_retries + 1
+        for attempt in range(attempts):
+            self._respect_rate_limit()
+            try:
+                response = self._sender(payload)
+                input_tokens, output_tokens = _extract_usage(response)
+                self._track_usage(input_tokens, output_tokens)
+                return _extract_anthropic_tool_calls_or_text(response)
+            except RuntimeError as exc:
+                if attempt >= self._max_retries:
+                    raise
+                self._usage.retries += 1
+                if "429" in str(exc):
+                    self._sleep_rate_limit(attempt, rng)
+                else:
+                    self._sleep_backoff(attempt, rng)
+
+        msg = "unreachable retry state"
+        raise RuntimeError(msg)
+
     def usage_snapshot(self) -> dict[str, object]:
         return {
             "provider": "anthropic",
@@ -252,6 +316,33 @@ def _extract_usage(response: dict[str, object]) -> tuple[int, int]:
     input_tokens = _to_int(usage.get("input_tokens"))
     output_tokens = _to_int(usage.get("output_tokens"))
     return (input_tokens, output_tokens)
+
+
+def _extract_anthropic_tool_calls_or_text(
+    response: dict[str, object],
+) -> tuple[list[dict[str, object]], str | None]:
+    """Parse an Anthropic Messages response into (tool_use_blocks, None) or ([], text)."""
+    content = response.get("content", [])
+    stop_reason = response.get("stop_reason")
+
+    if stop_reason == "tool_use":
+        if not isinstance(content, list):
+            msg = "Unexpected content format in Anthropic tool response"
+            raise ValueError(msg)
+        tool_use_blocks = [
+            b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"
+        ]
+        return (tool_use_blocks, None)
+
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    return ([], text)
+
+    msg = "Cannot extract tool calls or text from Anthropic response"
+    raise ValueError(msg)
 
 
 def _to_int(value: object) -> int:

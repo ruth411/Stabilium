@@ -146,3 +146,62 @@ class ConvASICalculator:
             raise ValueError(msg)
         penalty = sum(w * m for w, m in zip(self._weights.as_tuple(), metrics))
         return min(max(100.0 * (1.0 - penalty), 0.0), 100.0)
+
+
+@dataclass(frozen=True)
+class AgentWeights:
+    """All fields are failure rates (0.0 = perfect, 1.0 = worst)."""
+
+    trajectory_inconsistency: float  # 1 - trajectory_consistency
+    goal_failure_rate: float  # 1 - goal_completion_rate
+    tool_error_rate: float  # 1 - tool_selection_accuracy
+    path_waste_rate: float  # 1 - step_efficiency
+    parameter_error_rate: float  # 1 - parameter_fidelity
+    fault_failure_rate: float  # 1 - fault_robustness
+
+    def as_tuple(self) -> tuple[float, ...]:
+        return (
+            self.trajectory_inconsistency,
+            self.goal_failure_rate,
+            self.tool_error_rate,
+            self.path_waste_rate,
+            self.parameter_error_rate,
+            self.fault_failure_rate,
+        )
+
+
+DEFAULT_AGENT_WEIGHTS = AgentWeights(0.25, 0.25, 0.20, 0.15, 0.10, 0.05)
+
+
+class AgentASICalculator:
+    """Composite Agent Stability Index calculator for agentic trace evaluation."""
+
+    def __init__(self, weights: AgentWeights = DEFAULT_AGENT_WEIGHTS) -> None:
+        total = sum(weights.as_tuple())
+        if abs(total - 1.0) > 1e-9:
+            msg = "AgentWeights must sum to 1.0"
+            raise ValueError(msg)
+        self._weights = weights
+
+    def calculate(
+        self,
+        trajectory_inconsistency: float,
+        goal_failure_rate: float,
+        tool_error_rate: float,
+        path_waste_rate: float,
+        parameter_error_rate: float,
+        fault_failure_rate: float,
+    ) -> float:
+        metrics = (
+            trajectory_inconsistency,
+            goal_failure_rate,
+            tool_error_rate,
+            path_waste_rate,
+            parameter_error_rate,
+            fault_failure_rate,
+        )
+        if any(m < 0 or m > 1 for m in metrics):
+            msg = "all agent metrics must be in [0, 1]"
+            raise ValueError(msg)
+        penalty = sum(w * m for w, m in zip(self._weights.as_tuple(), metrics))
+        return min(max(100.0 * (1.0 - penalty), 0.0), 100.0)

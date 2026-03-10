@@ -92,3 +92,91 @@ def test_openai_adapter_call_messages_uses_chat_sender() -> None:
     assert result == "chat output"
     assert usage["requests"] == 1
     assert usage["total_tokens"] == 5
+
+
+def test_openai_adapter_call_with_tools_returns_tool_calls() -> None:
+    def chat_sender(payload: dict[str, object]) -> dict[str, object]:
+        assert payload["tool_choice"] == "auto"
+        tools = payload.get("tools")
+        assert isinstance(tools, list)
+        return {
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "call_123",
+                                "type": "function",
+                                "function": {
+                                    "name": "search_web",
+                                    "arguments": '{"query":"AAPL"}',
+                                },
+                            }
+                        ]
+                    },
+                }
+            ],
+            "usage": {"prompt_tokens": 6, "completion_tokens": 4, "total_tokens": 10},
+        }
+
+    adapter = OpenAIChatAdapter(
+        model="gpt-4o-mini",
+        api_key="test-key",
+        sender=lambda _payload: {"output_text": "unused"},
+        chat_sender=chat_sender,
+        max_retries=0,
+    )
+
+    tool_calls, text = adapter.call_with_tools(
+        [{"role": "user", "content": "Find AAPL"}],
+        [
+            {
+                "name": "search_web",
+                "description": "Search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            }
+        ],
+        random.Random(0),
+    )
+    usage = adapter.usage_snapshot()
+
+    assert isinstance(tool_calls, list)
+    assert len(tool_calls) == 1
+    assert text is None
+    assert usage["requests"] == 1
+    assert usage["total_tokens"] == 10
+
+
+def test_openai_adapter_call_with_tools_returns_text() -> None:
+    def chat_sender(_payload: dict[str, object]) -> dict[str, object]:
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": "No tool needed."},
+                }
+            ],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+        }
+
+    adapter = OpenAIChatAdapter(
+        model="gpt-4o-mini",
+        api_key="test-key",
+        sender=lambda _payload: {"output_text": "unused"},
+        chat_sender=chat_sender,
+        max_retries=0,
+    )
+
+    tool_calls, text = adapter.call_with_tools(
+        [{"role": "user", "content": "Say hi"}],
+        [],
+        random.Random(1),
+    )
+
+    assert tool_calls == []
+    assert text == "No tool needed."

@@ -126,6 +126,45 @@ class OpenAIChatAdapter:
         msg = "unreachable retry state"
         raise RuntimeError(msg)
 
+    def call_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+        rng: random.Random | None = None,
+    ) -> tuple[list[dict[str, object]], str | None]:
+        """One Chat Completions call with tool definitions.
+
+        Returns:
+            (tool_call_dicts, None)  — model wants to invoke tools.
+            ([], final_text)         — model produced a final answer.
+        """
+        openai_tools = [{"type": "function", "function": t} for t in tools]
+        payload: dict[str, object] = {
+            "model": self._model,
+            "messages": messages,
+            "tools": openai_tools,
+            "tool_choice": "auto",
+        }
+        if self._temperature is not None:
+            payload["temperature"] = self._temperature
+
+        attempts = self._max_retries + 1
+        for attempt in range(attempts):
+            self._respect_rate_limit()
+            try:
+                response = self._chat_sender(payload)
+                prompt_tokens, completion_tokens, total_tokens = _extract_usage(response)
+                self._track_usage(prompt_tokens, completion_tokens, total_tokens)
+                return _extract_tool_calls_or_text(response)
+            except Exception:
+                if attempt >= self._max_retries:
+                    raise
+                self._usage.retries += 1
+                self._sleep_backoff(attempt, rng)
+
+        msg = "unreachable retry state"
+        raise RuntimeError(msg)
+
     def usage_snapshot(self) -> dict[str, object]:
         return {
             "provider": "openai",
@@ -275,6 +314,33 @@ def _extract_usage(response: dict[str, object]) -> tuple[int, int, int]:
         total_tokens = prompt_tokens + completion_tokens
 
     return (prompt_tokens, completion_tokens, total_tokens)
+
+
+def _extract_tool_calls_or_text(
+    response: dict[str, object],
+) -> tuple[list[dict[str, object]], str | None]:
+    """Parse a Chat Completions response into (tool_calls, None) or ([], text)."""
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        msg = "No choices in OpenAI tool response"
+        raise ValueError(msg)
+    first = choices[0]
+    if not isinstance(first, dict):
+        msg = "Unexpected choices format in OpenAI tool response"
+        raise ValueError(msg)
+    message = first.get("message", {})
+    if not isinstance(message, dict):
+        msg = "Unexpected message format in OpenAI tool response"
+        raise ValueError(msg)
+    finish_reason = first.get("finish_reason")
+    tool_calls = message.get("tool_calls")
+    if finish_reason == "tool_calls" and isinstance(tool_calls, list):
+        return (tool_calls, None)
+    content = message.get("content")
+    if isinstance(content, str):
+        return ([], content)
+    msg = "Cannot extract tool calls or text from OpenAI response"
+    raise ValueError(msg)
 
 
 def _to_int(value: object) -> int:
