@@ -93,6 +93,68 @@ python -m agent_stability_engine.cli export \
 
 ---
 
+## Mode 2 Custom Agent SDK (`TraceCollector`)
+
+If you have your own Python agent orchestration loop, instrument it directly and compute trace metrics without using provider-native tool-calling.
+
+```python
+from agent_stability_engine.engine.trajectory import compute_trace_metrics
+from agent_stability_engine.traces import AgentTask, TraceCollector
+
+task = AgentTask(
+    id="task-001",
+    difficulty="medium",
+    goal="Find AAPL and decide if it is above 200",
+    tools=[
+        {
+            "name": "search_web",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+        {
+            "name": "extract_number",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "target": {"type": "string"},
+                },
+                "required": ["text", "target"],
+            },
+        },
+    ],
+    reference_trajectory=["search_web", "extract_number"],
+    expected_answer="above 200",
+    max_steps=6,
+    timeout_seconds=60,
+    sandbox_responses={},
+)
+
+collector = TraceCollector()
+for run_idx in range(3):
+    with collector.trace(
+        task_id=task.id,
+        goal=task.goal,
+        run_index=run_idx,
+        expected_answer=task.expected_answer,
+    ) as trace:
+        with trace.tool_span("search_web", {"query": "AAPL price"}) as search:
+            search.result = "AAPL is 227.5"
+        with trace.tool_span(
+            "extract_number", {"text": search.result, "target": "AAPL"}
+        ) as extract:
+            extract.result = "227.5"
+        trace.final_answer = f"AAPL is above 200 at ${extract.result}"
+
+metrics = compute_trace_metrics(collector.get_traces(), task)
+print(metrics["trace_asi"])
+```
+
+---
+
 ## REST API
 
 The API server powers the [Stabilium web platform](https://stabilium.ruthwikdovala.com). Run it locally:
@@ -130,6 +192,7 @@ POST   /jobs               Submit a new benchmark evaluation (async, returns 202
 GET    /jobs               List all jobs for the authenticated user
 GET    /jobs/{id}          Get a single job (includes completed_cases for progress)
 GET    /jobs/{id}/report   Get the full JSON report once completed
+GET    /jobs/{id}/traces   Get raw agent traces (agent_benchmark jobs only)
 GET    /jobs/{id}/report/pdf  Download a PDF compliance report
 ```
 
@@ -154,7 +217,8 @@ Jobs run in a background subprocess. The `completed_cases` field updates after e
 Stage 0 contract notes:
 - Existing clients remain compatible: `suite`, `job_type`, `fault_rate`, and `workers` are optional.
 - `job_type` defaults to `benchmark`.
-- `conversation_benchmark` and `agent_benchmark` are contract-locked but not yet enabled in Stage 0 (returns `501`).
+- `conversation_benchmark` and `agent_benchmark` are enabled.
+- `agent_benchmark` currently supports `openai` and `anthropic` providers.
 - `fault_rate` is validated and only allowed for `agent_benchmark`.
 - `suite` must be a JSON file path within the repository root.
 
@@ -168,7 +232,7 @@ POST /evaluate   Synchronous evaluation (no auth required, capped at 100 cases)
 
 ## Database schema
 
-PostgreSQL. Three tables:
+PostgreSQL. Four tables:
 
 ```sql
 users   (id, name, business_name, email, password_salt, password_hash, created_at)
@@ -177,6 +241,7 @@ jobs    (id, user_id, provider, model, suite, job_type, fault_rate, workers,
          run_count, max_cases, seed,
          status, completed_cases, created_at, updated_at,
          started_at, finished_at, error_message, result_json)
+agent_traces (id, job_id, task_id, run_index, trace_json, created_at)
 ```
 
 ---
