@@ -10,6 +10,7 @@ import sys
 import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -39,8 +40,10 @@ from agent_stability_engine.contracts import (
 from agent_stability_engine.engine.embeddings import EmbeddingProvider
 from agent_stability_engine.report.export import build_export_bundle
 from agent_stability_engine.report.pdf_renderer import write_compliance_pdf
+from agent_stability_engine.runners.agent_benchmark import run_agent_benchmark_suite
 from agent_stability_engine.runners.benchmark import run_benchmark_suite
 from agent_stability_engine.runners.conversation_benchmark import run_conversation_benchmark_suite
+from agent_stability_engine.traces.schema import AgentTrace
 
 BASE_DIR = Path(__file__).parent.parent
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -190,6 +193,19 @@ def _init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_traces (
+                id SERIAL PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                task_id TEXT NOT NULL,
+                run_index INTEGER NOT NULL,
+                trace_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_traces_job_id ON agent_traces(job_id)")
         # Idempotent migrations for pre-existing databases
         conn.execute(
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_cases INTEGER NOT NULL DEFAULT 0"
@@ -277,6 +293,17 @@ class JobListResponse(BaseModel):
 class JobReportResponse(BaseModel):
     job_id: str
     report: dict[str, object]
+
+
+class JobTraceRecord(BaseModel):
+    task_id: str
+    run_index: int
+    trace: dict[str, object]
+
+
+class JobTracesResponse(BaseModel):
+    job_id: str
+    traces: list[JobTraceRecord]
 
 
 class EvaluateRequest(BaseModel):
@@ -455,6 +482,28 @@ def _sanitize_error_message(message: str, api_key: str) -> str:
     return sanitized
 
 
+def _persist_agent_traces(*, job_id: str, traces: list[AgentTrace]) -> None:
+    if not traces:
+        return
+    created_at = _utc_now_iso()
+    with _connect_db() as conn:
+        conn.execute("DELETE FROM agent_traces WHERE job_id = %s", (job_id,))
+        for trace in traces:
+            conn.execute(
+                """
+                INSERT INTO agent_traces (job_id, task_id, run_index, trace_json, created_at)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    job_id,
+                    trace.task_id,
+                    trace.run_index,
+                    json.dumps(asdict(trace)),
+                    created_at,
+                ),
+            )
+
+
 def _run_benchmark_report(
     *,
     suite_path: Path,
@@ -466,6 +515,7 @@ def _run_benchmark_report(
     run_count: int,
     max_cases: int,
     seed: int,
+    fault_rate: float = 0.0,
     job_id: str | None = None,
     workers: int = 1,
 ) -> dict[str, object]:
@@ -526,6 +576,25 @@ def _run_benchmark_report(
             agent_factory=agent_factory,
             progress_callback=progress_callback,
         )
+        return result.report
+
+    if job_type == "agent_benchmark":
+        if provider == "custom":
+            msg = "agent_benchmark currently supports only openai and anthropic providers"
+            raise RuntimeError(msg)
+        result = run_agent_benchmark_suite(
+            suite_path=suite_path,
+            adapter=agent,
+            run_count=run_count,
+            seed=seed,
+            fault_rate=fault_rate,
+            max_tasks=max_cases,
+            workers=workers,
+            progress_callback=progress_callback,
+            agent_factory=agent_factory,
+        )
+        if job_id is not None:
+            _persist_agent_traces(job_id=job_id, traces=result.traces)
         return result.report
 
     msg = f"job_type '{job_type}' is not enabled yet"
@@ -633,6 +702,7 @@ def _run_job_worker(
             run_count=run_count,
             max_cases=max_cases,
             seed=seed,
+            fault_rate=fault_rate,
             job_id=job_id,
             workers=workers,
         )
@@ -945,10 +1015,10 @@ def create_job(
         validate_job_contract(job_type=req.job_type, fault_rate=req.fault_rate)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if req.job_type == "agent_benchmark":
+    if req.job_type == "agent_benchmark" and req.provider == "custom":
         raise HTTPException(
-            status_code=501,
-            detail=(f"job_type '{req.job_type}' is not enabled yet"),
+            status_code=400,
+            detail="job_type 'agent_benchmark' is supported only for openai and anthropic",
         )
     custom_endpoint = _validate_custom_endpoint(req.provider, req.custom_endpoint)
     api_key = req.api_key.strip()
@@ -1111,6 +1181,61 @@ def get_job_report(
 ) -> JobReportResponse:
     _, report_payload = _load_job_report_payload(job_id=job_id, user_id=user.id)
     return JobReportResponse(job_id=job_id, report=report_payload)
+
+
+@app.get("/jobs/{job_id}/traces", response_model=JobTracesResponse)
+def get_job_traces(
+    job_id: str,
+    user: Annotated[UserPublic, Depends(_require_user)],
+) -> JobTracesResponse:
+    with _connect_db() as conn:
+        job_row = conn.execute(
+            "SELECT job_type FROM jobs WHERE id = %s AND user_id = %s",
+            (job_id, user.id),
+        ).fetchone()
+        if job_row is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        job_type = str(job_row["job_type"])
+        if job_type != "agent_benchmark":
+            raise HTTPException(
+                status_code=400,
+                detail="traces are only available for job_type 'agent_benchmark'",
+            )
+        rows = conn.execute(
+            """
+            SELECT task_id, run_index, trace_json
+            FROM agent_traces
+            WHERE job_id = %s
+            ORDER BY task_id ASC, run_index ASC, id ASC
+            """,
+            (job_id,),
+        ).fetchall()
+
+    traces: list[JobTraceRecord] = []
+    for row in rows:
+        raw_trace_json = row["trace_json"]
+        if not isinstance(raw_trace_json, str):
+            continue
+        try:
+            parsed = json.loads(raw_trace_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=500, detail="stored trace payload is invalid JSON"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise HTTPException(
+                status_code=500,
+                detail="stored trace payload has unexpected shape",
+            )
+        traces.append(
+            JobTraceRecord(
+                task_id=str(row["task_id"]),
+                run_index=int(row["run_index"]),
+                trace=parsed,
+            )
+        )
+
+    return JobTracesResponse(job_id=job_id, traces=traces)
 
 
 @app.get("/jobs/{job_id}/report/pdf")

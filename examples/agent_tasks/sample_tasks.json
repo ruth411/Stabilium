@@ -1,0 +1,773 @@
+{
+  "name": "agent_task_suite_v1",
+  "type": "agent",
+  "tasks": [
+    {
+      "id": "search-price-001",
+      "difficulty": "easy",
+      "goal": "Find the current price of AAPL stock and tell me if it is above $200.",
+      "tools": [
+        {
+          "name": "search_web",
+          "description": "Search the web for a query and return relevant text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string", "description": "The search query"}
+            },
+            "required": ["query"]
+          }
+        },
+        {
+          "name": "extract_number",
+          "description": "Extract a numeric value from text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "text": {"type": "string"},
+              "target": {"type": "string", "description": "What number to extract"}
+            },
+            "required": ["text", "target"]
+          }
+        }
+      ],
+      "reference_trajectory": ["search_web", "extract_number"],
+      "expected_answer": "above $200",
+      "max_steps": 6,
+      "timeout_seconds": 60,
+      "sandbox_responses": {
+        "search_web": "AAPL is trading at $227.50 as of today.",
+        "extract_number": "227.50"
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "search-price-002",
+      "difficulty": "easy",
+      "goal": "What is the current price of MSFT and is it above $400?",
+      "tools": [
+        {
+          "name": "search_web",
+          "description": "Search the web for a query and return relevant text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string"}
+            },
+            "required": ["query"]
+          }
+        },
+        {
+          "name": "extract_number",
+          "description": "Extract a numeric value from text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "text": {"type": "string"},
+              "target": {"type": "string"}
+            },
+            "required": ["text", "target"]
+          }
+        }
+      ],
+      "reference_trajectory": ["search_web", "extract_number"],
+      "expected_answer": "above $400",
+      "max_steps": 6,
+      "timeout_seconds": 60,
+      "sandbox_responses": {
+        "search_web": "Microsoft (MSFT) closed at $415.20 today.",
+        "extract_number": "415.20"
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "search-weather-003",
+      "difficulty": "easy",
+      "goal": "What is the weather in New York today and is it above 60°F?",
+      "tools": [
+        {
+          "name": "search_web",
+          "description": "Search the web for current weather data.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string"}
+            },
+            "required": ["query"]
+          }
+        },
+        {
+          "name": "extract_number",
+          "description": "Extract a numeric temperature value from text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "text": {"type": "string"},
+              "target": {"type": "string"}
+            },
+            "required": ["text", "target"]
+          }
+        }
+      ],
+      "reference_trajectory": ["search_web", "extract_number"],
+      "expected_answer": "above 60",
+      "max_steps": 6,
+      "timeout_seconds": 60,
+      "sandbox_responses": {
+        "search_web": "New York City weather today: 72°F, partly cloudy.",
+        "extract_number": "72"
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "search-news-004",
+      "difficulty": "medium",
+      "goal": "Find the latest news about OpenAI and summarize the main story.",
+      "tools": [
+        {
+          "name": "search_web",
+          "description": "Search the web for news articles.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string"}
+            },
+            "required": ["query"]
+          }
+        },
+        {
+          "name": "fetch_article",
+          "description": "Fetch the full text of a news article by URL.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "url": {"type": "string", "description": "Article URL to fetch"}
+            },
+            "required": ["url"]
+          }
+        }
+      ],
+      "reference_trajectory": ["search_web", "fetch_article"],
+      "expected_answer": "OpenAI",
+      "max_steps": 6,
+      "timeout_seconds": 60,
+      "sandbox_responses": {
+        "search_web": "OpenAI launches new model series. URL: https://example.com/openai-news",
+        "fetch_article": "OpenAI announced a new series of language models focused on reasoning and efficiency."
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "search-rate-005",
+      "difficulty": "medium",
+      "goal": "What is the current US federal funds rate and has it changed in the last month?",
+      "tools": [
+        {
+          "name": "search_web",
+          "description": "Search the web for economic data.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string"}
+            },
+            "required": ["query"]
+          }
+        },
+        {
+          "name": "extract_number",
+          "description": "Extract a numeric rate value from text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "text": {"type": "string"},
+              "target": {"type": "string"}
+            },
+            "required": ["text", "target"]
+          }
+        }
+      ],
+      "reference_trajectory": ["search_web", "extract_number"],
+      "expected_answer": "5.25",
+      "max_steps": 6,
+      "timeout_seconds": 60,
+      "sandbox_responses": {
+        "search_web": "The US Federal Reserve maintains the federal funds rate at 5.25%-5.50%, unchanged for the past month.",
+        "extract_number": "5.25"
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "calc-compound-001",
+      "difficulty": "medium",
+      "goal": "If I invest $10,000 at 7% annual interest compounded annually, how much will I have after 10 years?",
+      "tools": [
+        {
+          "name": "calculator",
+          "description": "Evaluate a mathematical expression and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "expression": {"type": "string", "description": "Math expression to evaluate"}
+            },
+            "required": ["expression"]
+          }
+        }
+      ],
+      "reference_trajectory": ["calculator"],
+      "expected_answer": "19671",
+      "max_steps": 4,
+      "timeout_seconds": 30,
+      "sandbox_responses": {
+        "calculator": "19671.51"
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "calc-tax-002",
+      "difficulty": "medium",
+      "goal": "Calculate the total cost of an item priced at $85.00 with 8.5% sales tax.",
+      "tools": [
+        {
+          "name": "calculator",
+          "description": "Evaluate a mathematical expression and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "expression": {"type": "string"}
+            },
+            "required": ["expression"]
+          }
+        }
+      ],
+      "reference_trajectory": ["calculator"],
+      "expected_answer": "92.22",
+      "max_steps": 4,
+      "timeout_seconds": 30,
+      "sandbox_responses": {
+        "calculator": "92.225"
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "calc-mortgage-003",
+      "difficulty": "hard",
+      "goal": "What is the monthly payment on a $300,000 mortgage at 6.5% annual interest over 30 years?",
+      "tools": [
+        {
+          "name": "calculator",
+          "description": "Evaluate a mathematical expression.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "expression": {"type": "string"}
+            },
+            "required": ["expression"]
+          }
+        }
+      ],
+      "reference_trajectory": ["calculator", "calculator"],
+      "expected_answer": "1896",
+      "max_steps": 6,
+      "timeout_seconds": 30,
+      "sandbox_responses": {
+        "calculator": "1896.20"
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "calc-roi-004",
+      "difficulty": "medium",
+      "goal": "I bought shares for $5,200 and sold them for $7,800. What is my ROI percentage?",
+      "tools": [
+        {
+          "name": "calculator",
+          "description": "Evaluate a mathematical expression.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "expression": {"type": "string"}
+            },
+            "required": ["expression"]
+          }
+        }
+      ],
+      "reference_trajectory": ["calculator"],
+      "expected_answer": "50%",
+      "max_steps": 4,
+      "timeout_seconds": 30,
+      "sandbox_responses": {
+        "calculator": "50.0"
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "compare-stocks-001",
+      "difficulty": "medium",
+      "goal": "Compare the current prices of AAPL and GOOGL. Which one is higher?",
+      "tools": [
+        {
+          "name": "fetch_stock_price",
+          "description": "Fetch the current stock price for a given ticker symbol.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "ticker": {"type": "string", "description": "Stock ticker symbol"}
+            },
+            "required": ["ticker"]
+          }
+        },
+        {
+          "name": "compare_values",
+          "description": "Compare two numeric values and return which is higher.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "value_a": {"type": "number", "description": "First value"},
+              "label_a": {"type": "string"},
+              "value_b": {"type": "number", "description": "Second value"},
+              "label_b": {"type": "string"}
+            },
+            "required": ["value_a", "label_a", "value_b", "label_b"]
+          }
+        }
+      ],
+      "reference_trajectory": ["fetch_stock_price", "fetch_stock_price", "compare_values"],
+      "expected_answer": "GOOGL",
+      "max_steps": 8,
+      "timeout_seconds": 60,
+      "sandbox_responses": {
+        "fetch_stock_price": "176.50",
+        "compare_values": "GOOGL at $176.50 is higher than AAPL at $160.20"
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "compare-cities-002",
+      "difficulty": "medium",
+      "goal": "Compare the population of New York City and Los Angeles. Which city is larger?",
+      "tools": [
+        {
+          "name": "search_web",
+          "description": "Search the web for population data.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string"}
+            },
+            "required": ["query"]
+          }
+        },
+        {
+          "name": "extract_number",
+          "description": "Extract a numeric population value from text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "text": {"type": "string"},
+              "target": {"type": "string"}
+            },
+            "required": ["text", "target"]
+          }
+        },
+        {
+          "name": "compare_values",
+          "description": "Compare two numeric values and return which is higher.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "value_a": {"type": "number"},
+              "label_a": {"type": "string"},
+              "value_b": {"type": "number"},
+              "label_b": {"type": "string"}
+            },
+            "required": ["value_a", "label_a", "value_b", "label_b"]
+          }
+        }
+      ],
+      "reference_trajectory": ["search_web", "search_web", "compare_values"],
+      "expected_answer": "New York",
+      "max_steps": 8,
+      "timeout_seconds": 60,
+      "sandbox_responses": {
+        "search_web": "New York City has a population of approximately 8.3 million people.",
+        "extract_number": "8300000",
+        "compare_values": "New York City (8.3M) is larger than Los Angeles (3.9M)"
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "compare-products-003",
+      "difficulty": "hard",
+      "goal": "Compare the battery life of iPhone 15 and Samsung Galaxy S24. Which has longer battery life?",
+      "tools": [
+        {
+          "name": "search_web",
+          "description": "Search for product specifications.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string"}
+            },
+            "required": ["query"]
+          }
+        },
+        {
+          "name": "compare_values",
+          "description": "Compare two numeric values.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "value_a": {"type": "number"},
+              "label_a": {"type": "string"},
+              "value_b": {"type": "number"},
+              "label_b": {"type": "string"}
+            },
+            "required": ["value_a", "label_a", "value_b", "label_b"]
+          }
+        }
+      ],
+      "reference_trajectory": ["search_web", "search_web", "compare_values"],
+      "expected_answer": "Samsung Galaxy S24",
+      "max_steps": 8,
+      "timeout_seconds": 60,
+      "sandbox_responses": {
+        "search_web": "iPhone 15 battery: up to 20 hours video playback. Samsung Galaxy S24 battery: up to 24 hours video playback.",
+        "compare_values": "Samsung Galaxy S24 (24h) has longer battery life than iPhone 15 (20h)"
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "compare-rates-004",
+      "difficulty": "medium",
+      "goal": "Compare the 30-year fixed mortgage rate and the 15-year fixed mortgage rate. Which is lower?",
+      "tools": [
+        {
+          "name": "search_web",
+          "description": "Search for current mortgage rates.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string"}
+            },
+            "required": ["query"]
+          }
+        },
+        {
+          "name": "compare_values",
+          "description": "Compare two numeric values and return which is lower.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "value_a": {"type": "number"},
+              "label_a": {"type": "string"},
+              "value_b": {"type": "number"},
+              "label_b": {"type": "string"}
+            },
+            "required": ["value_a", "label_a", "value_b", "label_b"]
+          }
+        }
+      ],
+      "reference_trajectory": ["search_web", "compare_values"],
+      "expected_answer": "15-year",
+      "max_steps": 6,
+      "timeout_seconds": 60,
+      "sandbox_responses": {
+        "search_web": "Current mortgage rates: 30-year fixed at 7.1%, 15-year fixed at 6.4%.",
+        "compare_values": "15-year fixed (6.4%) is lower than 30-year fixed (7.1%)"
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "decision-invest-001",
+      "difficulty": "hard",
+      "goal": "Should I invest in AAPL stock today? Check the price trend and P/E ratio, then give a recommendation.",
+      "tools": [
+        {
+          "name": "fetch_stock_price",
+          "description": "Fetch current stock price and recent trend.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "ticker": {"type": "string"}
+            },
+            "required": ["ticker"]
+          }
+        },
+        {
+          "name": "fetch_fundamentals",
+          "description": "Fetch fundamental financial metrics for a stock.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "ticker": {"type": "string"}
+            },
+            "required": ["ticker"]
+          }
+        },
+        {
+          "name": "analyze_investment",
+          "description": "Analyze data and return an investment recommendation.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "price": {"type": "number"},
+              "pe_ratio": {"type": "number"},
+              "trend": {"type": "string"}
+            },
+            "required": ["price", "pe_ratio", "trend"]
+          }
+        }
+      ],
+      "reference_trajectory": ["fetch_stock_price", "fetch_fundamentals", "analyze_investment"],
+      "expected_answer": "hold",
+      "max_steps": 8,
+      "timeout_seconds": 60,
+      "sandbox_responses": {
+        "fetch_stock_price": "AAPL: $227.50, up 1.2% over the past week, 3-month trend: upward.",
+        "fetch_fundamentals": "AAPL P/E ratio: 32.5, EPS: $6.98, market cap: $3.4T",
+        "analyze_investment": "Based on P/E of 32.5 and upward trend, recommendation: hold. Valuation is elevated but momentum is positive."
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "decision-hire-002",
+      "difficulty": "hard",
+      "goal": "I have a candidate with 5 years of experience and a salary ask of $120K. Is this within budget if our budget is $110K-$130K?",
+      "tools": [
+        {
+          "name": "check_budget_range",
+          "description": "Check if a value falls within a specified range.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "value": {"type": "number"},
+              "min": {"type": "number"},
+              "max": {"type": "number"}
+            },
+            "required": ["value", "min", "max"]
+          }
+        },
+        {
+          "name": "analyze_candidate",
+          "description": "Analyze candidate suitability based on experience and budget fit.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "years_experience": {"type": "number"},
+              "salary_ask": {"type": "number"},
+              "budget_fit": {"type": "boolean"}
+            },
+            "required": ["years_experience", "salary_ask", "budget_fit"]
+          }
+        }
+      ],
+      "reference_trajectory": ["check_budget_range", "analyze_candidate"],
+      "expected_answer": "within budget",
+      "max_steps": 6,
+      "timeout_seconds": 30,
+      "sandbox_responses": {
+        "check_budget_range": "true — $120K is within the range $110K-$130K.",
+        "analyze_candidate": "Candidate is within budget. 5 years experience is appropriate. Recommend proceeding to next interview stage."
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "decision-travel-003",
+      "difficulty": "medium",
+      "goal": "I want to travel from New York to London next week. Find flight options and tell me the cheapest one.",
+      "tools": [
+        {
+          "name": "search_flights",
+          "description": "Search for available flights between two cities.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "origin": {"type": "string"},
+              "destination": {"type": "string"},
+              "date": {"type": "string"}
+            },
+            "required": ["origin", "destination", "date"]
+          }
+        },
+        {
+          "name": "find_cheapest",
+          "description": "Find the cheapest option from a list of results.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "results_text": {"type": "string"}
+            },
+            "required": ["results_text"]
+          }
+        }
+      ],
+      "reference_trajectory": ["search_flights", "find_cheapest"],
+      "expected_answer": "$480",
+      "max_steps": 6,
+      "timeout_seconds": 60,
+      "sandbox_responses": {
+        "search_flights": "Flights from JFK to LHR: Delta $520, United $480, British Airways $610, Virgin Atlantic $495.",
+        "find_cheapest": "United at $480 is the cheapest option."
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "decision-health-004",
+      "difficulty": "medium",
+      "goal": "My BMI is 26.5. Is this considered overweight, and what category does it fall into?",
+      "tools": [
+        {
+          "name": "lookup_bmi_category",
+          "description": "Look up the BMI category for a given BMI value.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "bmi": {"type": "number"}
+            },
+            "required": ["bmi"]
+          }
+        },
+        {
+          "name": "get_health_recommendation",
+          "description": "Get a health recommendation based on BMI category.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "category": {"type": "string"},
+              "bmi": {"type": "number"}
+            },
+            "required": ["category", "bmi"]
+          }
+        }
+      ],
+      "reference_trajectory": ["lookup_bmi_category", "get_health_recommendation"],
+      "expected_answer": "overweight",
+      "max_steps": 6,
+      "timeout_seconds": 30,
+      "sandbox_responses": {
+        "lookup_bmi_category": "BMI 26.5 falls in the Overweight category (25.0-29.9).",
+        "get_health_recommendation": "With a BMI of 26.5 (Overweight), consider moderate exercise and a balanced diet."
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "error-retry-001",
+      "difficulty": "hard",
+      "goal": "Search for the GDP of Germany and tell me if it is above $3 trillion.",
+      "tools": [
+        {
+          "name": "search_web",
+          "description": "Search the web for economic data. Note: this tool may occasionally fail.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string"}
+            },
+            "required": ["query"]
+          }
+        },
+        {
+          "name": "extract_number",
+          "description": "Extract a numeric value from text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "text": {"type": "string"},
+              "target": {"type": "string"}
+            },
+            "required": ["text", "target"]
+          }
+        }
+      ],
+      "reference_trajectory": ["search_web", "extract_number"],
+      "expected_answer": "above $3 trillion",
+      "max_steps": 8,
+      "timeout_seconds": 60,
+      "sandbox_responses": {
+        "search_web": "",
+        "extract_number": "4.07"
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "error-retry-002",
+      "difficulty": "hard",
+      "goal": "Fetch the current EUR/USD exchange rate and tell me if 1 EUR buys more than 1 USD.",
+      "tools": [
+        {
+          "name": "fetch_exchange_rate",
+          "description": "Fetch a currency exchange rate. Note: this tool may return empty results.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "base": {"type": "string", "description": "Base currency code"},
+              "target": {"type": "string", "description": "Target currency code"}
+            },
+            "required": ["base", "target"]
+          }
+        },
+        {
+          "name": "compare_values",
+          "description": "Compare two numeric values.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "value_a": {"type": "number"},
+              "label_a": {"type": "string"},
+              "value_b": {"type": "number"},
+              "label_b": {"type": "string"}
+            },
+            "required": ["value_a", "label_a", "value_b", "label_b"]
+          }
+        }
+      ],
+      "reference_trajectory": ["fetch_exchange_rate", "compare_values"],
+      "expected_answer": "1 EUR buys more than 1 USD",
+      "max_steps": 8,
+      "timeout_seconds": 60,
+      "sandbox_responses": {
+        "fetch_exchange_rate": "",
+        "compare_values": "EUR (1.08) is greater than USD (1.00). 1 EUR buys more than 1 USD."
+      },
+      "tool_endpoints": {}
+    },
+    {
+      "id": "error-retry-003",
+      "difficulty": "hard",
+      "goal": "Look up the boiling point of water in Celsius and convert it to Fahrenheit.",
+      "tools": [
+        {
+          "name": "lookup_fact",
+          "description": "Look up a scientific fact. Note: this tool may occasionally return empty results.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string"}
+            },
+            "required": ["query"]
+          }
+        },
+        {
+          "name": "calculator",
+          "description": "Evaluate a mathematical expression.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "expression": {"type": "string"}
+            },
+            "required": ["expression"]
+          }
+        }
+      ],
+      "reference_trajectory": ["lookup_fact", "calculator"],
+      "expected_answer": "212",
+      "max_steps": 8,
+      "timeout_seconds": 30,
+      "sandbox_responses": {
+        "lookup_fact": "",
+        "calculator": "212"
+      },
+      "tool_endpoints": {}
+    }
+  ]
+}

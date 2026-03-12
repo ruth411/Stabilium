@@ -10,6 +10,8 @@ from agent_stability_engine.engine.trajectory import compute_trace_metrics
 from agent_stability_engine.engine.variance import EmbeddingVarianceScorer, VarianceResult
 from agent_stability_engine.report.manifest import build_manifest
 from agent_stability_engine.report.schema import REPORT_SCHEMA_VERSION, validate_report
+from agent_stability_engine.runners.agent_benchmark import run_agent_benchmark_suite
+from agent_stability_engine.runners.conversation_benchmark import run_conversation_benchmark_suite
 from agent_stability_engine.traces.collector import TraceCollector
 from agent_stability_engine.traces.schema import AgentTask, AgentTrace
 
@@ -43,5 +45,7 @@ __all__ = [
     "__version__",
     "build_manifest",
     "compute_trace_metrics",
+    "run_agent_benchmark_suite",
+    "run_conversation_benchmark_suite",
     "validate_report",
 ]
