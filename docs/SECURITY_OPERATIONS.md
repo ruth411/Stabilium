@@ -38,6 +38,19 @@ auth_throttles (
 )
 ```
 
+Automatic IP blocking state is tracked in `ip_blocks`:
+
+```sql
+ip_blocks (
+  ip TEXT PRIMARY KEY,
+  blocked_until TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)
+```
+
+If `ASE_RATE_LIMIT_BACKEND=database`, shared limiter events are tracked in `rate_limit_events`.
+
 ## Recommended Alerts
 
 Run these queries on a schedule (e.g., every 5 minutes) and trigger alerts on non-empty results.
@@ -127,6 +140,32 @@ FROM auth_throttles
 WHERE locked_until IS NOT NULL
   AND locked_until >= (NOW() AT TIME ZONE 'UTC')::text
 ORDER BY locked_until DESC;
+```
+
+### 7) Active IP blocks
+
+```sql
+SELECT
+  ip,
+  blocked_until,
+  reason,
+  updated_at
+FROM ip_blocks
+WHERE blocked_until >= (NOW() AT TIME ZONE 'UTC')::text
+ORDER BY blocked_until DESC;
+```
+
+### 8) MFA adoption and activity (24 hours)
+
+```sql
+SELECT
+  event_type,
+  COUNT(*) AS count
+FROM security_events
+WHERE event_type IN ('auth_mfa_setup', 'auth_mfa_enabled', 'auth_mfa_disabled')
+  AND created_at >= (NOW() AT TIME ZONE 'UTC' - INTERVAL '24 hours')::text
+GROUP BY event_type
+ORDER BY count DESC;
 ```
 
 ## Incident Response Checklist

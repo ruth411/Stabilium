@@ -45,7 +45,13 @@ from agent_stability_engine.report.pdf_renderer import write_compliance_pdf
 from agent_stability_engine.runners.agent_benchmark import run_agent_benchmark_suite
 from agent_stability_engine.runners.benchmark import run_benchmark_suite
 from agent_stability_engine.runners.conversation_benchmark import run_conversation_benchmark_suite
-from agent_stability_engine.security import sanitize_error_message, validate_custom_endpoint_url
+from agent_stability_engine.security import (
+    build_otpauth_uri,
+    generate_totp_secret,
+    sanitize_error_message,
+    validate_custom_endpoint_url,
+    verify_totp,
+)
 from agent_stability_engine.traces.schema import AgentTrace
 
 BASE_DIR = Path(__file__).parent.parent
@@ -66,6 +72,10 @@ MAX_DAILY_JOBS_PER_USER = int(os.getenv("ASE_MAX_DAILY_JOBS_PER_USER", "100"))
 LOGIN_FAILURE_WINDOW_SECONDS = int(os.getenv("ASE_LOGIN_FAILURE_WINDOW_SECONDS", "900"))
 LOGIN_FAILURE_MAX_ATTEMPTS = int(os.getenv("ASE_LOGIN_FAILURE_MAX_ATTEMPTS", "8"))
 LOGIN_LOCKOUT_SECONDS = int(os.getenv("ASE_LOGIN_LOCKOUT_SECONDS", "900"))
+IP_BLOCK_WINDOW_SECONDS = int(os.getenv("ASE_IP_BLOCK_WINDOW_SECONDS", "900"))
+IP_BLOCK_FAILURE_THRESHOLD = int(os.getenv("ASE_IP_BLOCK_FAILURE_THRESHOLD", "40"))
+IP_BLOCK_SECONDS = int(os.getenv("ASE_IP_BLOCK_SECONDS", "1800"))
+RATE_LIMIT_BACKEND = os.getenv("ASE_RATE_LIMIT_BACKEND", "memory").strip().lower()
 TRUST_X_FORWARDED_FOR = os.getenv("ASE_TRUST_X_FORWARDED_FOR", "false").strip().lower() in {
     "1",
     "true",
@@ -170,7 +180,14 @@ def _enforce_rate_limit(
     window_seconds: int,
     detail: str,
 ) -> None:
-    allowed = _rate_limiter.allow(key, max_requests=max_requests, window_seconds=window_seconds)
+    if RATE_LIMIT_BACKEND == "database":
+        allowed = _rate_limit_allow_db(
+            key=key,
+            max_requests=max_requests,
+            window_seconds=window_seconds,
+        )
+    else:
+        allowed = _rate_limiter.allow(key, max_requests=max_requests, window_seconds=window_seconds)
     if not allowed:
         raise HTTPException(status_code=429, detail=detail)
 
@@ -178,6 +195,65 @@ def _enforce_rate_limit(
 def _login_identity_hash(email: str, ip: str) -> str:
     material = f"{_normalize_email(email)}|{ip}"
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _rate_limit_allow_db(*, key: str, max_requests: int, window_seconds: int) -> bool:
+    if max_requests <= 0:
+        return False
+    if window_seconds <= 0:
+        return True
+
+    now = _utc_now()
+    lower = now - timedelta(seconds=window_seconds)
+    now_iso = now.isoformat().replace("+00:00", "Z")
+    lower_iso = lower.isoformat().replace("+00:00", "Z")
+
+    try:
+        with _connect_db() as conn:
+            conn.execute("DELETE FROM rate_limit_events WHERE created_at < %s", (lower_iso,))
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM rate_limit_events
+                WHERE rl_key = %s AND created_at >= %s
+                """,
+                (key, lower_iso),
+            ).fetchone()
+            count = int(row["count"]) if row is not None else 0
+            if count >= max_requests:
+                return False
+            conn.execute(
+                "INSERT INTO rate_limit_events (rl_key, created_at) VALUES (%s, %s)",
+                (key, now_iso),
+            )
+            return True
+    except Exception:  # noqa: BLE001
+        # Fail-open to in-memory limiter if DB backend is unavailable.
+        return _rate_limiter.allow(key, max_requests=max_requests, window_seconds=window_seconds)
+
+
+def _is_ip_currently_blocked(ip: str) -> bool:
+    if not ip or ip == "unknown":
+        return False
+    now_iso = _utc_now_iso()
+    with _connect_db() as conn:
+        row = conn.execute(
+            """
+            SELECT blocked_until
+            FROM ip_blocks
+            WHERE ip = %s
+            """,
+            (ip,),
+        ).fetchone()
+    if row is None:
+        return False
+    blocked_until = row["blocked_until"]
+    return isinstance(blocked_until, str) and blocked_until > now_iso
+
+
+def _enforce_ip_not_blocked(ip: str) -> None:
+    if _is_ip_currently_blocked(ip):
+        raise HTTPException(status_code=403, detail="request blocked for this IP")
 
 
 def _hash_password(password: str, salt_hex: str) -> str:
@@ -323,6 +399,28 @@ def _init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_auth_throttles_locked_until "
             "ON auth_throttles(locked_until)"
         )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS rate_limit_events (
+                id SERIAL PRIMARY KEY,
+                rl_key TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rate_limit_events_key_time "
+            "ON rate_limit_events(rl_key, created_at)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ip_blocks (
+                ip TEXT PRIMARY KEY,
+                blocked_until TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ip_blocks_blocked_until " "ON ip_blocks(blocked_until)"
+        )
         # Idempotent migrations for pre-existing databases
         conn.execute(
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_cases INTEGER NOT NULL DEFAULT 0"
@@ -340,6 +438,8 @@ def _init_db() -> None:
         )
         conn.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS workers INTEGER NOT NULL DEFAULT 1")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_secret TEXT")
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN DEFAULT FALSE")
 
 
 class UserPublic(BaseModel):
@@ -348,6 +448,7 @@ class UserPublic(BaseModel):
     business_name: str
     email: str
     created_at: str
+    mfa_enabled: bool = False
 
 
 class AuthResponse(BaseModel):
@@ -365,6 +466,20 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=8, max_length=128)
+    mfa_code: str | None = Field(default=None, max_length=16)
+
+
+class MFASetupResponse(BaseModel):
+    secret: str
+    otpauth_uri: str
+
+
+class MFAEnableRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=16)
+
+
+class MFADisableRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=16)
 
 
 class JobCreateRequest(BaseModel):
@@ -444,12 +559,15 @@ class EvaluateResponse(BaseModel):
 
 
 def _row_to_user(row: psycopg2.extras.RealDictRow) -> UserPublic:
+    raw_mfa = row.get("mfa_enabled")
+    mfa_enabled = bool(raw_mfa) if isinstance(raw_mfa, (bool, int)) else False
     return UserPublic(
         id=str(row["id"]),
         name=str(row["name"]) if row["name"] else "",
         business_name=str(row["business_name"]),
         email=str(row["email"]),
         created_at=str(row["created_at"]),
+        mfa_enabled=mfa_enabled,
     )
 
 
@@ -540,7 +658,7 @@ def _require_user(
     with _connect_db() as conn:
         row = conn.execute(
             """
-            SELECT s.expires_at, u.id, u.name, u.business_name, u.email, u.created_at
+            SELECT s.expires_at, u.id, u.name, u.business_name, u.email, u.created_at, u.mfa_enabled
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token = %s
@@ -754,6 +872,60 @@ def _clear_login_failures(*, email: str, ip: str) -> None:
     identity = _login_identity_hash(email, ip)
     with _connect_db() as conn:
         conn.execute("DELETE FROM auth_throttles WHERE identity_hash = %s", (identity,))
+
+
+def _block_ip(*, ip: str, reason: str, duration_seconds: int) -> None:
+    if not ip or ip == "unknown":
+        return
+    now_iso = _utc_now_iso()
+    blocked_until = (
+        (_utc_now() + timedelta(seconds=max(duration_seconds, 1)))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    with _connect_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO ip_blocks (ip, blocked_until, reason, updated_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (ip)
+            DO UPDATE SET blocked_until = EXCLUDED.blocked_until,
+                          reason = EXCLUDED.reason,
+                          updated_at = EXCLUDED.updated_at
+            """,
+            (ip, blocked_until, reason, now_iso),
+        )
+
+
+def _auto_block_if_abusive(*, ip: str) -> bool:
+    if not ip or ip == "unknown":
+        return False
+    now = _utc_now()
+    lower = (now - timedelta(seconds=IP_BLOCK_WINDOW_SECONDS)).isoformat().replace("+00:00", "Z")
+    with _connect_db() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM security_events
+            WHERE ip = %s
+              AND event_type IN (
+                  'auth_login_failed',
+                  'auth_login_blocked',
+                  'auth_register_conflict'
+              )
+              AND created_at >= %s
+            """,
+            (ip, lower),
+        ).fetchone()
+    failures = int(row["count"]) if row is not None else 0
+    if failures >= IP_BLOCK_FAILURE_THRESHOLD:
+        _block_ip(
+            ip=ip,
+            reason=f"auto_block_threshold_exceeded:{failures}",
+            duration_seconds=IP_BLOCK_SECONDS,
+        )
+        return True
+    return False
 
 
 def _persist_agent_traces(*, job_id: str, traces: list[AgentTrace]) -> None:
@@ -1208,6 +1380,7 @@ def health() -> dict[str, str]:
 @app.post("/auth/register", response_model=AuthResponse)
 def register(req: RegisterRequest, request: Request) -> AuthResponse:
     ip = _client_ip(request)
+    _enforce_ip_not_blocked(ip)
     _enforce_rate_limit(
         key=f"auth:register:{ip}",
         max_requests=AUTH_RATE_LIMIT_MAX_REQUESTS,
@@ -1247,12 +1420,17 @@ def register(req: RegisterRequest, request: Request) -> AuthResponse:
                 ip=ip,
                 details={"email": email},
             )
+            _auto_block_if_abusive(ip=ip)
             raise HTTPException(status_code=409, detail="email already registered") from exc
 
         token = _create_session(conn, user_id)
         conn.commit()
         row = conn.execute(
-            "SELECT id, name, business_name, email, created_at FROM users WHERE id = %s",
+            """
+            SELECT id, name, business_name, email, created_at, mfa_enabled
+            FROM users
+            WHERE id = %s
+            """,
             (user_id,),
         ).fetchone()
 
@@ -1270,6 +1448,7 @@ def register(req: RegisterRequest, request: Request) -> AuthResponse:
 @app.post("/auth/login", response_model=AuthResponse)
 def login(req: LoginRequest, request: Request) -> AuthResponse:
     ip = _client_ip(request)
+    _enforce_ip_not_blocked(ip)
     _enforce_rate_limit(
         key=f"auth:login:{ip}",
         max_requests=AUTH_RATE_LIMIT_MAX_REQUESTS,
@@ -1288,7 +1467,8 @@ def login(req: LoginRequest, request: Request) -> AuthResponse:
     with _connect_db() as conn:
         row = conn.execute(
             """
-            SELECT id, name, business_name, email, created_at, password_salt, password_hash
+            SELECT id, name, business_name, email, created_at, password_salt, password_hash,
+                   mfa_enabled, mfa_secret
             FROM users
             WHERE email = %s
             """,
@@ -1305,6 +1485,7 @@ def login(req: LoginRequest, request: Request) -> AuthResponse:
                     "lockout_applied": lockout_applied,
                 },
             )
+            _auto_block_if_abusive(ip=ip)
             raise HTTPException(status_code=401, detail="invalid email or password")
         if not _verify_password(req.password, str(row["password_salt"]), str(row["password_hash"])):
             failures, lockout_applied = _record_login_failure(email=email, ip=ip)
@@ -1317,7 +1498,37 @@ def login(req: LoginRequest, request: Request) -> AuthResponse:
                     "lockout_applied": lockout_applied,
                 },
             )
+            _auto_block_if_abusive(ip=ip)
             raise HTTPException(status_code=401, detail="invalid email or password")
+        mfa_enabled_raw = row.get("mfa_enabled")
+        mfa_enabled = bool(mfa_enabled_raw) if isinstance(mfa_enabled_raw, (bool, int)) else False
+        mfa_secret_raw = row.get("mfa_secret")
+        mfa_secret = str(mfa_secret_raw) if isinstance(mfa_secret_raw, str) else ""
+        if mfa_enabled:
+            if not req.mfa_code:
+                _log_security_event(
+                    event_type="auth_login_failed",
+                    ip=ip,
+                    details={"reason": "mfa_required_missing"},
+                )
+                raise HTTPException(status_code=401, detail="mfa code required")
+            if not mfa_secret or not verify_totp(
+                mfa_secret,
+                req.mfa_code,
+                timestamp=int(time.time()),
+            ):
+                failures, lockout_applied = _record_login_failure(email=email, ip=ip)
+                _log_security_event(
+                    event_type="auth_login_failed",
+                    ip=ip,
+                    details={
+                        "reason": "mfa_code_invalid",
+                        "failure_count": failures,
+                        "lockout_applied": lockout_applied,
+                    },
+                )
+                _auto_block_if_abusive(ip=ip)
+                raise HTTPException(status_code=401, detail="invalid mfa code")
         token = _create_session(conn, str(row["id"]))
         conn.commit()
         user = _row_to_user(row)
@@ -1334,6 +1545,124 @@ def login(req: LoginRequest, request: Request) -> AuthResponse:
 @app.get("/auth/me", response_model=UserPublic)
 def auth_me(user: Annotated[UserPublic, Depends(_require_user)]) -> UserPublic:
     return user
+
+
+@app.post("/auth/mfa/setup", response_model=MFASetupResponse)
+def mfa_setup(
+    request: Request,
+    user: Annotated[UserPublic, Depends(_require_user)],
+) -> MFASetupResponse:
+    ip = _client_ip(request)
+    _enforce_ip_not_blocked(ip)
+    secret = generate_totp_secret()
+    with _connect_db() as conn:
+        conn.execute(
+            "UPDATE users SET mfa_secret = %s, mfa_enabled = FALSE WHERE id = %s",
+            (secret, user.id),
+        )
+    uri = build_otpauth_uri(secret=secret, account_name=user.email, issuer="Stabilium")
+    _log_security_event(
+        event_type="auth_mfa_setup",
+        ip=ip,
+        user_id=user.id,
+        details={},
+    )
+    return MFASetupResponse(secret=secret, otpauth_uri=uri)
+
+
+@app.post("/auth/mfa/enable", response_model=UserPublic)
+def mfa_enable(
+    req: MFAEnableRequest,
+    request: Request,
+    user: Annotated[UserPublic, Depends(_require_user)],
+) -> UserPublic:
+    ip = _client_ip(request)
+    _enforce_ip_not_blocked(ip)
+    with _connect_db() as conn:
+        row = conn.execute(
+            """
+            SELECT id, name, business_name, email, created_at, mfa_secret, mfa_enabled
+            FROM users
+            WHERE id = %s
+            """,
+            (user.id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        secret_raw = row["mfa_secret"]
+        secret = str(secret_raw) if isinstance(secret_raw, str) else ""
+        if not secret:
+            raise HTTPException(status_code=400, detail="mfa setup is required first")
+        if not verify_totp(secret, req.code, timestamp=int(time.time())):
+            raise HTTPException(status_code=400, detail="invalid mfa code")
+        conn.execute("UPDATE users SET mfa_enabled = TRUE WHERE id = %s", (user.id,))
+        updated = conn.execute(
+            """
+            SELECT id, name, business_name, email, created_at, mfa_enabled
+            FROM users
+            WHERE id = %s
+            """,
+            (user.id,),
+        ).fetchone()
+    _log_security_event(
+        event_type="auth_mfa_enabled",
+        ip=ip,
+        user_id=user.id,
+        details={},
+    )
+    if updated is None:
+        raise HTTPException(status_code=500, detail="failed to enable mfa")
+    return _row_to_user(updated)
+
+
+@app.post("/auth/mfa/disable", response_model=UserPublic)
+def mfa_disable(
+    req: MFADisableRequest,
+    request: Request,
+    user: Annotated[UserPublic, Depends(_require_user)],
+) -> UserPublic:
+    ip = _client_ip(request)
+    _enforce_ip_not_blocked(ip)
+    with _connect_db() as conn:
+        row = conn.execute(
+            """
+            SELECT id, name, business_name, email, created_at, mfa_secret, mfa_enabled
+            FROM users
+            WHERE id = %s
+            """,
+            (user.id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        mfa_enabled_raw = row["mfa_enabled"]
+        mfa_enabled = bool(mfa_enabled_raw) if isinstance(mfa_enabled_raw, (bool, int)) else False
+        secret_raw = row["mfa_secret"]
+        secret = str(secret_raw) if isinstance(secret_raw, str) else ""
+        if not mfa_enabled or not secret:
+            raise HTTPException(status_code=400, detail="mfa is not enabled")
+        if not verify_totp(secret, req.code, timestamp=int(time.time())):
+            raise HTTPException(status_code=400, detail="invalid mfa code")
+        conn.execute(
+            "UPDATE users SET mfa_enabled = FALSE, mfa_secret = NULL WHERE id = %s",
+            (user.id,),
+        )
+        updated = conn.execute(
+            """
+            SELECT id, name, business_name, email, created_at, mfa_enabled
+            FROM users
+            WHERE id = %s
+            """,
+            (user.id,),
+        ).fetchone()
+    _log_security_event(
+        event_type="auth_mfa_disabled",
+        ip=ip,
+        user_id=user.id,
+        details={},
+    )
+    if updated is None:
+        raise HTTPException(status_code=500, detail="failed to disable mfa")
+    return _row_to_user(updated)
 
 
 @app.post("/auth/logout")
@@ -1361,6 +1690,7 @@ def create_job(
     user: Annotated[UserPublic, Depends(_require_user)],
 ) -> JobSummary:
     ip = _client_ip(request)
+    _enforce_ip_not_blocked(ip)
     _enforce_rate_limit(
         key=f"job:create:{user.id}:{ip}",
         max_requests=JOB_RATE_LIMIT_MAX_REQUESTS,
@@ -1640,6 +1970,7 @@ def get_job_report_pdf(
 @app.post("/evaluate", response_model=EvaluateResponse)
 def evaluate(req: EvaluateRequest, request: Request) -> EvaluateResponse:
     ip = _client_ip(request)
+    _enforce_ip_not_blocked(ip)
     _enforce_rate_limit(
         key=f"public:evaluate:{ip}",
         max_requests=PUBLIC_EVAL_RATE_LIMIT_MAX_REQUESTS,

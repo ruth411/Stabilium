@@ -1,0 +1,44 @@
+name: Security Scans
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  static-security:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Security Scanners
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install bandit semgrep
+
+      - name: Bandit SAST
+        run: |
+          python -m bandit -r api src -x tests -q
+
+      - name: Semgrep SAST
+        run: |
+          semgrep --config p/security-audit --error --metrics=off --exclude tests
+
+  zap-baseline:
+    if: ${{ secrets.SECURITY_SCAN_TARGET_URL != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: OWASP ZAP Baseline
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: ${{ secrets.SECURITY_SCAN_TARGET_URL }}
+          cmd_options: "-a -j -m 5 -T 20"

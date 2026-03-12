@@ -173,6 +173,7 @@ uvicorn api.main:app --reload --port 8000
 | `ASE_API_SESSION_TTL_HOURS` | `168` | Session expiry (7 days) |
 | `ASE_WATCHDOG_TIMEOUT_SECONDS` | `3600` | Max seconds a benchmark job may run |
 | `ASE_ALLOWED_ORIGINS` | `*` | CORS origins (comma-separated, or `*`) |
+| `ASE_RATE_LIMIT_BACKEND` | `memory` | `memory` or `database` for rate-limit state |
 | `ASE_ALLOW_INSECURE_CUSTOM_ENDPOINTS` | `false` | Allow `http://` custom endpoints (recommended only for local dev) |
 | `ASE_CUSTOM_ENDPOINT_ALLOWLIST` | _(empty)_ | Optional comma-separated hostname allowlist for `provider=custom` |
 | `ASE_AUTH_RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding window for auth endpoint throttling |
@@ -186,6 +187,9 @@ uvicorn api.main:app --reload --port 8000
 | `ASE_LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Rolling window for login failure tracking |
 | `ASE_LOGIN_FAILURE_MAX_ATTEMPTS` | `8` | Failed logins allowed in window before temporary lockout |
 | `ASE_LOGIN_LOCKOUT_SECONDS` | `900` | Temporary lockout duration once threshold is exceeded |
+| `ASE_IP_BLOCK_WINDOW_SECONDS` | `900` | Window for abusive-IP scoring |
+| `ASE_IP_BLOCK_FAILURE_THRESHOLD` | `40` | Security event count threshold to auto-block an IP |
+| `ASE_IP_BLOCK_SECONDS` | `1800` | Auto-block duration for abusive IPs |
 | `ASE_TRUST_X_FORWARDED_FOR` | `false` | Trust `X-Forwarded-For` as client IP (enable only behind trusted proxy) |
 | `ASE_ALLOW_PRIVATE_DNS_TARGETS` | `false` | Disable DNS-level private IP protections for custom endpoints (dev only) |
 
@@ -193,8 +197,11 @@ uvicorn api.main:app --reload --port 8000
 
 ```
 POST /auth/register   { name, business_name, email, password }  → { token, user }
-POST /auth/login      { email, password }                        → { token, user }
+POST /auth/login      { email, password, mfa_code? }             → { token, user }
 GET  /auth/me                                                    → UserPublic
+POST /auth/mfa/setup                                              → { secret, otpauth_uri }
+POST /auth/mfa/enable   { code }                                  → UserPublic
+POST /auth/mfa/disable  { code }                                  → UserPublic
 POST /auth/logout
 ```
 

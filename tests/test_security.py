@@ -6,8 +6,12 @@ import pytest
 
 from agent_stability_engine.security import (
     assert_public_endpoint_host,
+    build_otpauth_uri,
+    generate_totp_secret,
     sanitize_error_message,
+    totp_code,
     validate_custom_endpoint_url,
+    verify_totp,
 )
 
 
@@ -84,3 +88,23 @@ def test_assert_public_endpoint_host_accepts_public_resolution(
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
     assert_public_endpoint_host("https://example.com/infer")
+
+
+def test_totp_rfc_vector_matches_expected_code() -> None:
+    # RFC 6238 shared secret for SHA-1 test vectors.
+    secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    assert totp_code(secret, timestamp=59, digits=8) == "94287082"
+
+
+def test_verify_totp_accepts_neighbor_window() -> None:
+    secret = generate_totp_secret()
+    code_prev = totp_code(secret, timestamp=30)
+    # Verify at next time-step with default +/-1 window.
+    assert verify_totp(secret, code_prev, timestamp=60) is True
+
+
+def test_otpauth_uri_contains_issuer_and_secret() -> None:
+    uri = build_otpauth_uri(secret="ABC123SECRET", account_name="user@example.com", issuer="ASE")
+    assert uri.startswith("otpauth://totp/")
+    assert "issuer=ASE" in uri
+    assert "secret=ABC123SECRET" in uri
