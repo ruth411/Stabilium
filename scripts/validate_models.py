@@ -749,9 +749,9 @@ def main() -> int:
         asi = metrics.get("agent_stability_index", report.get("mean_asi", 0))
         asi_float = float(asi) if isinstance(asi, (int, float)) else 0.0
         label = (
-            "ConvASI" if args.mode == "conversation"
-            else "TraceASI" if args.mode == "agent"
-            else "ASI"
+            "ConvASI"
+            if args.mode == "conversation"
+            else "TraceASI" if args.mode == "agent" else "ASI"
         )
         print(
             f"[{model}] {label} = {asi_float:.1f}  |  "
