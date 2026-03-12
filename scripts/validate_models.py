@@ -36,9 +36,11 @@ from agent_stability_engine.adapters.openai import OpenAIChatAdapter
 from agent_stability_engine.engine.asi import ASIProfile
 from agent_stability_engine.engine.embeddings import EmbeddingProvider
 from agent_stability_engine.engine.stats import compare_sample_means
-from agent_stability_engine.runners.benchmark import run_benchmark_suite
 from agent_stability_engine.runners.agent_benchmark import run_agent_benchmark_suite
-from agent_stability_engine.runners.conversation_benchmark import run_conversation_benchmark_suite
+from agent_stability_engine.runners.benchmark import run_benchmark_suite
+from agent_stability_engine.runners.conversation_benchmark import (
+    run_conversation_benchmark_suite,
+)
 
 # ---------------------------------------------------------------------------
 # Progress bar
@@ -377,7 +379,8 @@ def _generate_markdown(comparison: dict[str, object]) -> str:
             if is_conversation
             else (
                 "| Rank | Model | TraceASI | TraceASI 95% CI | Traj Consistency | "
-                "Tool Accuracy | Step Efficiency | Goal Completion | Param Fidelity | Fault Robustness |"
+                "Tool Accuracy | Step Efficiency | Goal Completion | "
+                "Param Fidelity | Fault Robustness |"
                 if is_agent
                 else (
                     "| Rank | Model | ASI | ASI 95% CI | Variance | "
@@ -502,7 +505,7 @@ def _generate_markdown(comparison: dict[str, object]) -> str:
         lines += [
             "| **TraceASI** (Agent Trace ASI) | 0–100 | Higher |",
             "| **Trajectory Consistency** | 0–1 | Higher — consistent tool sequences across runs |",
-            "| **Tool Selection Accuracy** | 0–1 | Higher — Jaccard overlap with reference trajectory |",
+            "| **Tool Selection Accuracy** | 0–1 | Higher — Jaccard overlap with reference |",
             "| **Step Efficiency** | 0–1 | Higher — fewer steps than reference |",
             "| **Goal Completion Rate** | 0–1 | Higher — task succeeded |",
             "| **Parameter Fidelity** | 0–1 | Higher — required params always provided |",
@@ -745,7 +748,11 @@ def main() -> int:
 
         asi = metrics.get("agent_stability_index", report.get("mean_asi", 0))
         asi_float = float(asi) if isinstance(asi, (int, float)) else 0.0
-        label = "ConvASI" if args.mode == "conversation" else "TraceASI" if args.mode == "agent" else "ASI"
+        label = (
+            "ConvASI" if args.mode == "conversation"
+            else "TraceASI" if args.mode == "agent"
+            else "ASI"
+        )
         print(
             f"[{model}] {label} = {asi_float:.1f}  |  "
             f"cases={num_cases}  →  saved {model_path.name}"
