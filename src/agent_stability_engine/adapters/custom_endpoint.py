@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from typing import Callable
 from urllib import error, request
 
+from agent_stability_engine.security import (
+    assert_public_endpoint_host,
+    validate_custom_endpoint_url,
+)
+
 
 @dataclass
 class _UsageTotals:
@@ -29,9 +34,7 @@ class CustomEndpointAdapter:
         jitter_seconds: float = 0.2,
         sender: Callable[[dict[str, object]], dict[str, object]] | None = None,
     ) -> None:
-        if not endpoint_url.startswith(("http://", "https://")):
-            msg = "endpoint_url must start with http:// or https://"
-            raise ValueError(msg)
+        endpoint_url = validate_custom_endpoint_url(endpoint_url)
         if not model:
             msg = "model must be non-empty"
             raise ValueError(msg)
@@ -110,6 +113,7 @@ class CustomEndpointAdapter:
         }
 
     def _default_sender(self, payload: dict[str, object]) -> dict[str, object]:
+        assert_public_endpoint_host(self._endpoint_url)
         data = json.dumps(payload).encode("utf-8")
         http_request = request.Request(
             self._endpoint_url,

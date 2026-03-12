@@ -173,6 +173,21 @@ uvicorn api.main:app --reload --port 8000
 | `ASE_API_SESSION_TTL_HOURS` | `168` | Session expiry (7 days) |
 | `ASE_WATCHDOG_TIMEOUT_SECONDS` | `3600` | Max seconds a benchmark job may run |
 | `ASE_ALLOWED_ORIGINS` | `*` | CORS origins (comma-separated, or `*`) |
+| `ASE_ALLOW_INSECURE_CUSTOM_ENDPOINTS` | `false` | Allow `http://` custom endpoints (recommended only for local dev) |
+| `ASE_CUSTOM_ENDPOINT_ALLOWLIST` | _(empty)_ | Optional comma-separated hostname allowlist for `provider=custom` |
+| `ASE_AUTH_RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding window for auth endpoint throttling |
+| `ASE_AUTH_RATE_LIMIT_MAX_REQUESTS` | `10` | Max auth requests per IP per window |
+| `ASE_JOB_RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding window for authenticated job submissions |
+| `ASE_JOB_RATE_LIMIT_MAX_REQUESTS` | `5` | Max job-create requests per user+IP per window |
+| `ASE_PUBLIC_EVAL_RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding window for unauthenticated `/evaluate` requests |
+| `ASE_PUBLIC_EVAL_RATE_LIMIT_MAX_REQUESTS` | `5` | Max unauthenticated evaluate requests per IP per window |
+| `ASE_MAX_CONCURRENT_JOBS_PER_USER` | `3` | Max simultaneously queued/running jobs per user |
+| `ASE_MAX_DAILY_JOBS_PER_USER` | `100` | Max jobs a user can create per UTC day |
+| `ASE_LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Rolling window for login failure tracking |
+| `ASE_LOGIN_FAILURE_MAX_ATTEMPTS` | `8` | Failed logins allowed in window before temporary lockout |
+| `ASE_LOGIN_LOCKOUT_SECONDS` | `900` | Temporary lockout duration once threshold is exceeded |
+| `ASE_TRUST_X_FORWARDED_FOR` | `false` | Trust `X-Forwarded-For` as client IP (enable only behind trusted proxy) |
+| `ASE_ALLOW_PRIVATE_DNS_TARGETS` | `false` | Disable DNS-level private IP protections for custom endpoints (dev only) |
 
 ### Auth endpoints
 
@@ -184,6 +199,7 @@ POST /auth/logout
 ```
 
 Passwords are hashed with PBKDF2-SHA256 (310,000 iterations). Sessions are stored in PostgreSQL and expire after 7 days.
+Passwords must include upper/lowercase letters, a digit, a symbol, and no spaces.
 
 ### Job endpoints
 
@@ -298,3 +314,4 @@ python -c "import agent_stability_engine; print(agent_stability_engine.__version
 - `docs/RELEASE_CHECKLIST.md`
 - `docs/DEMO_RUNBOOK.md`
 - `docs/STAGE0_CONTRACT.md`
+- `docs/SECURITY_OPERATIONS.md`

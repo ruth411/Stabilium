@@ -1,0 +1,11 @@
+title = "Stabilium gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow explicit fake secret fixtures used in tests."
+regexes = [
+  '''sk-proj-abc123SECRET''',
+  '''sk-ant-api03-abcdef0123456789''',
+]

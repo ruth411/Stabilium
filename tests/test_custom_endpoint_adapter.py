@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import random
 
+import pytest
+
 from agent_stability_engine.adapters.custom_endpoint import CustomEndpointAdapter
 
 
@@ -81,3 +83,37 @@ def test_custom_endpoint_adapter_call_messages_joins_nonstandard_response() -> N
 
     assert result == "part one\npart two"
     assert usage["requests"] == 1
+
+
+def test_custom_endpoint_adapter_rejects_localhost_endpoint() -> None:
+    with pytest.raises(ValueError, match="host is not allowed"):
+        CustomEndpointAdapter(
+            endpoint_url="https://localhost/infer",
+            model="customer-agent-v1",
+            api_key="test-key",
+            sender=lambda _payload: {"output": "x"},
+        )
+
+
+def test_custom_endpoint_adapter_rejects_http_by_default() -> None:
+    with pytest.raises(ValueError, match="must use https"):
+        CustomEndpointAdapter(
+            endpoint_url="http://example.com/infer",
+            model="customer-agent-v1",
+            api_key="test-key",
+            sender=lambda _payload: {"output": "x"},
+        )
+
+
+def test_custom_endpoint_adapter_allows_http_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ASE_ALLOW_INSECURE_CUSTOM_ENDPOINTS", "true")
+
+    adapter = CustomEndpointAdapter(
+        endpoint_url="http://example.com/infer",
+        model="customer-agent-v1",
+        api_key="test-key",
+        sender=lambda _payload: {"output": "ok"},
+        max_retries=0,
+    )
+
+    assert adapter("prompt", random.Random(0)) == "ok"

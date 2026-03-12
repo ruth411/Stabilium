@@ -8,6 +8,8 @@ import os
 import secrets
 import sys
 import threading
+import time
+from collections import deque
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -21,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import psycopg2
 import psycopg2.extras
-from fastapi import Depends, FastAPI, HTTPException, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -43,6 +45,7 @@ from agent_stability_engine.report.pdf_renderer import write_compliance_pdf
 from agent_stability_engine.runners.agent_benchmark import run_agent_benchmark_suite
 from agent_stability_engine.runners.benchmark import run_benchmark_suite
 from agent_stability_engine.runners.conversation_benchmark import run_conversation_benchmark_suite
+from agent_stability_engine.security import sanitize_error_message, validate_custom_endpoint_url
 from agent_stability_engine.traces.schema import AgentTrace
 
 BASE_DIR = Path(__file__).parent.parent
@@ -50,12 +53,63 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 SESSION_TTL_HOURS = int(os.getenv("ASE_API_SESSION_TTL_HOURS", "168"))
 WATCHDOG_TIMEOUT_SECONDS = int(os.getenv("ASE_WATCHDOG_TIMEOUT_SECONDS", "3600"))
 _PASSWORD_ITERATIONS = 310_000
+AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("ASE_AUTH_RATE_LIMIT_WINDOW_SECONDS", "60"))
+AUTH_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("ASE_AUTH_RATE_LIMIT_MAX_REQUESTS", "10"))
+JOB_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("ASE_JOB_RATE_LIMIT_WINDOW_SECONDS", "60"))
+JOB_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("ASE_JOB_RATE_LIMIT_MAX_REQUESTS", "5"))
+PUBLIC_EVAL_RATE_LIMIT_WINDOW_SECONDS = int(
+    os.getenv("ASE_PUBLIC_EVAL_RATE_LIMIT_WINDOW_SECONDS", "60")
+)
+PUBLIC_EVAL_RATE_LIMIT_MAX_REQUESTS = int(os.getenv("ASE_PUBLIC_EVAL_RATE_LIMIT_MAX_REQUESTS", "5"))
+MAX_CONCURRENT_JOBS_PER_USER = int(os.getenv("ASE_MAX_CONCURRENT_JOBS_PER_USER", "3"))
+MAX_DAILY_JOBS_PER_USER = int(os.getenv("ASE_MAX_DAILY_JOBS_PER_USER", "100"))
+LOGIN_FAILURE_WINDOW_SECONDS = int(os.getenv("ASE_LOGIN_FAILURE_WINDOW_SECONDS", "900"))
+LOGIN_FAILURE_MAX_ATTEMPTS = int(os.getenv("ASE_LOGIN_FAILURE_MAX_ATTEMPTS", "8"))
+LOGIN_LOCKOUT_SECONDS = int(os.getenv("ASE_LOGIN_LOCKOUT_SECONDS", "900"))
+TRUST_X_FORWARDED_FOR = os.getenv("ASE_TRUST_X_FORWARDED_FOR", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 _auth_scheme = HTTPBearer(auto_error=False)
 
 # Registry of active benchmark subprocesses, keyed by job_id.
 # Populated by _run_job so that cancel_job can terminate them.
 _running_processes: dict[str, multiprocessing.Process] = {}
 _running_processes_lock = threading.Lock()
+
+
+class _InMemorySlidingWindowRateLimiter:
+    """Best-effort in-memory rate limiter.
+
+    This protects single-instance deployments; multi-instance setups should
+    enforce limits at an API gateway or shared store.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._buckets: dict[str, deque[float]] = {}
+
+    def allow(self, key: str, *, max_requests: int, window_seconds: int) -> bool:
+        if max_requests <= 0:
+            return False
+        if window_seconds <= 0:
+            return True
+
+        now = time.monotonic()
+        boundary = now - float(window_seconds)
+        with self._lock:
+            bucket = self._buckets.setdefault(key, deque())
+            while bucket and bucket[0] <= boundary:
+                bucket.popleft()
+            if len(bucket) >= max_requests:
+                return False
+            bucket.append(now)
+            return True
+
+
+_rate_limiter = _InMemorySlidingWindowRateLimiter()
 
 
 def _utc_now() -> datetime:
@@ -80,6 +134,50 @@ def _validate_email(email: str) -> None:
         raise HTTPException(status_code=400, detail="email must be valid")
     if "." not in normalized.split("@", 1)[1]:
         raise HTTPException(status_code=400, detail="email must be valid")
+
+
+def _validate_password_strength(password: str) -> None:
+    has_lower = any(ch.islower() for ch in password)
+    has_upper = any(ch.isupper() for ch in password)
+    has_digit = any(ch.isdigit() for ch in password)
+    has_symbol = any(not ch.isalnum() for ch in password)
+    has_space = any(ch.isspace() for ch in password)
+    if not (has_lower and has_upper and has_digit and has_symbol) or has_space:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "password must include upper/lowercase letters, a digit, " "a symbol, and no spaces"
+            ),
+        )
+
+
+def _client_ip(request: Request) -> str:
+    if TRUST_X_FORWARDED_FOR:
+        xff = request.headers.get("x-forwarded-for", "").strip()
+        if xff:
+            first = xff.split(",")[0].strip()
+            if first:
+                return first
+    if request.client is not None and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _enforce_rate_limit(
+    *,
+    key: str,
+    max_requests: int,
+    window_seconds: int,
+    detail: str,
+) -> None:
+    allowed = _rate_limiter.allow(key, max_requests=max_requests, window_seconds=window_seconds)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=detail)
+
+
+def _login_identity_hash(email: str, ip: str) -> str:
+    material = f"{_normalize_email(email)}|{ip}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _hash_password(password: str, salt_hex: str) -> str:
@@ -145,8 +243,7 @@ def _connect_db() -> _DBWrapper:
 
 def _init_db() -> None:
     with _connect_db() as conn:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL DEFAULT '',
@@ -156,20 +253,16 @@ def _init_db() -> None:
                 password_hash TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -191,10 +284,8 @@ def _init_db() -> None:
                 result_json TEXT,
                 completed_cases INTEGER NOT NULL DEFAULT 0
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_traces (
                 id SERIAL PRIMARY KEY,
                 job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -203,9 +294,35 @@ def _init_db() -> None:
                 trace_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
-            """
-        )
+            """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS security_events (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                event_type TEXT NOT NULL,
+                ip TEXT NOT NULL,
+                details_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_traces_job_id ON agent_traces(job_id)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_security_events_created_at "
+            "ON security_events(created_at)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS auth_throttles (
+                identity_hash TEXT PRIMARY KEY,
+                failures INTEGER NOT NULL,
+                window_started_at TEXT NOT NULL,
+                locked_until TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_auth_throttles_locked_until "
+            "ON auth_throttles(locked_until)"
+        )
         # Idempotent migrations for pre-existing databases
         conn.execute(
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_cases INTEGER NOT NULL DEFAULT 0"
@@ -258,7 +375,7 @@ class JobCreateRequest(BaseModel):
     suite: str = Field(default=DEFAULT_SUITE, min_length=1, max_length=512)
     job_type: Literal["benchmark", "conversation_benchmark", "agent_benchmark"] = DEFAULT_JOB_TYPE
     fault_rate: float = Field(default=0.0, ge=0.0, le=0.5)
-    run_count: int = Field(default=3, ge=1, le=10)
+    run_count: int = Field(default=3, ge=2, le=10)
     max_cases: int = Field(default=5, ge=1, le=100)
     seed: int = 42
     workers: int = Field(default=3, ge=1, le=10)
@@ -312,7 +429,7 @@ class EvaluateRequest(BaseModel):
     custom_endpoint: str | None = Field(default=None, max_length=2048)
     api_key: str = Field(min_length=1, max_length=2048)
     suite: str = Field(default=DEFAULT_SUITE, min_length=1, max_length=512)
-    run_count: int = Field(default=3, ge=1, le=10)
+    run_count: int = Field(default=3, ge=2, le=10)
     max_cases: int = Field(default=5, ge=1, le=100)
     seed: int = 42
 
@@ -392,7 +509,9 @@ def _row_to_job_summary(row: psycopg2.extras.RealDictRow) -> JobSummary:
 def _create_session(conn: _DBWrapper, user_id: str) -> str:
     now = _utc_now()
     expires = now + timedelta(hours=SESSION_TTL_HOURS)
+    now_iso = now.isoformat().replace("+00:00", "Z")
     token = f"ase_{secrets.token_urlsafe(32)}"
+    conn.execute("DELETE FROM sessions WHERE expires_at <= %s", (now_iso,))
     conn.execute(
         """
         INSERT INTO sessions (token, user_id, created_at, expires_at)
@@ -401,7 +520,7 @@ def _create_session(conn: _DBWrapper, user_id: str) -> str:
         (
             token,
             user_id,
-            now.isoformat().replace("+00:00", "Z"),
+            now_iso,
             expires.isoformat().replace("+00:00", "Z"),
         ),
     )
@@ -461,12 +580,10 @@ def _validate_custom_endpoint(provider: str, custom_endpoint: str | None) -> str
     if provider == "custom":
         if not endpoint:
             raise HTTPException(status_code=400, detail="custom_endpoint is required for custom")
-        if not endpoint.startswith(("http://", "https://")):
-            raise HTTPException(
-                status_code=400,
-                detail="custom_endpoint must start with http:// or https://",
-            )
-        return endpoint
+        try:
+            return validate_custom_endpoint_url(endpoint)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if endpoint:
         raise HTTPException(
             status_code=400,
@@ -476,10 +593,167 @@ def _validate_custom_endpoint(provider: str, custom_endpoint: str | None) -> str
 
 
 def _sanitize_error_message(message: str, api_key: str) -> str:
-    sanitized = message
-    if api_key and api_key in sanitized:
-        sanitized = sanitized.replace(api_key, "[REDACTED_API_KEY]")
-    return sanitized
+    return sanitize_error_message(
+        message,
+        secrets=[api_key],
+        max_length=2000,
+    )
+
+
+def _log_security_event(
+    *,
+    event_type: str,
+    ip: str,
+    user_id: str | None = None,
+    details: dict[str, object] | None = None,
+) -> None:
+    payload = details or {}
+    created_at = _utc_now_iso()
+    try:
+        with _connect_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO security_events (user_id, event_type, ip, details_json, created_at)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    user_id,
+                    event_type,
+                    ip,
+                    json.dumps(payload),
+                    created_at,
+                ),
+            )
+    except Exception:  # noqa: BLE001
+        # Best effort: never break request handling if audit logging fails.
+        pass
+
+
+def _enforce_job_limits(*, user_id: str) -> None:
+    now = _utc_now()
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_floor = start_of_day.isoformat().replace("+00:00", "Z")
+
+    with _connect_db() as conn:
+        concurrent_row = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM jobs
+            WHERE user_id = %s AND status IN ('queued', 'running')
+            """,
+            (user_id,),
+        ).fetchone()
+        daily_row = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM jobs
+            WHERE user_id = %s AND created_at >= %s
+            """,
+            (user_id, day_floor),
+        ).fetchone()
+
+    concurrent_count = int(concurrent_row["count"]) if concurrent_row is not None else 0
+    daily_count = int(daily_row["count"]) if daily_row is not None else 0
+
+    if concurrent_count >= MAX_CONCURRENT_JOBS_PER_USER:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "too many concurrent jobs for this account; "
+                f"limit={MAX_CONCURRENT_JOBS_PER_USER}"
+            ),
+        )
+    if daily_count >= MAX_DAILY_JOBS_PER_USER:
+        raise HTTPException(
+            status_code=429,
+            detail=f"daily job limit reached; limit={MAX_DAILY_JOBS_PER_USER}",
+        )
+
+
+def _is_login_temporarily_blocked(*, email: str, ip: str) -> bool:
+    identity = _login_identity_hash(email, ip)
+    now = _utc_now()
+    with _connect_db() as conn:
+        row = conn.execute(
+            """
+            SELECT locked_until
+            FROM auth_throttles
+            WHERE identity_hash = %s
+            """,
+            (identity,),
+        ).fetchone()
+    if row is None:
+        return False
+    locked_until_raw = row["locked_until"]
+    if not isinstance(locked_until_raw, str) or not locked_until_raw:
+        return False
+    return _parse_utc_iso(locked_until_raw) > now
+
+
+def _record_login_failure(*, email: str, ip: str) -> tuple[int, bool]:
+    identity = _login_identity_hash(email, ip)
+    now = _utc_now()
+    now_iso = now.isoformat().replace("+00:00", "Z")
+    lockout_until_iso: str | None = None
+    failures = 1
+    lockout_applied = False
+
+    with _connect_db() as conn:
+        row = conn.execute(
+            """
+            SELECT failures, window_started_at
+            FROM auth_throttles
+            WHERE identity_hash = %s
+            """,
+            (identity,),
+        ).fetchone()
+
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO auth_throttles (
+                    identity_hash, failures, window_started_at, locked_until, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (identity, 1, now_iso, None, now_iso),
+            )
+            return (1, False)
+
+        raw_failures = row["failures"]
+        failures = int(raw_failures) if isinstance(raw_failures, (int, float)) else 0
+        window_started_raw = row["window_started_at"]
+        if not isinstance(window_started_raw, str):
+            window_started_raw = now_iso
+        window_started = _parse_utc_iso(window_started_raw)
+
+        elapsed = (now - window_started).total_seconds()
+        if elapsed > LOGIN_FAILURE_WINDOW_SECONDS:
+            failures = 1
+            window_started_raw = now_iso
+        else:
+            failures += 1
+
+        if failures >= LOGIN_FAILURE_MAX_ATTEMPTS:
+            lockout_until = now + timedelta(seconds=LOGIN_LOCKOUT_SECONDS)
+            lockout_until_iso = lockout_until.isoformat().replace("+00:00", "Z")
+            lockout_applied = True
+
+        conn.execute(
+            """
+            UPDATE auth_throttles
+            SET failures = %s, window_started_at = %s, locked_until = %s, updated_at = %s
+            WHERE identity_hash = %s
+            """,
+            (failures, window_started_raw, lockout_until_iso, now_iso, identity),
+        )
+    return (failures, lockout_applied)
+
+
+def _clear_login_failures(*, email: str, ip: str) -> None:
+    identity = _login_identity_hash(email, ip)
+    with _connect_db() as conn:
+        conn.execute("DELETE FROM auth_throttles WHERE identity_hash = %s", (identity,))
 
 
 def _persist_agent_traces(*, job_id: str, traces: list[AgentTrace]) -> None:
@@ -727,7 +1001,7 @@ def _run_job_worker(
     except Exception as exc:
         finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         raw_message = str(exc)[:8000] or "evaluation failed"
-        message = _sanitize_error_message(raw_message, api_key)[:2000]
+        message = _sanitize_error_message(raw_message, api_key)
         failure_report = _build_failure_report(
             provider=provider,
             model=model,
@@ -915,14 +1189,33 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def _add_security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.post("/auth/register", response_model=AuthResponse)
-def register(req: RegisterRequest) -> AuthResponse:
+def register(req: RegisterRequest, request: Request) -> AuthResponse:
+    ip = _client_ip(request)
+    _enforce_rate_limit(
+        key=f"auth:register:{ip}",
+        max_requests=AUTH_RATE_LIMIT_MAX_REQUESTS,
+        window_seconds=AUTH_RATE_LIMIT_WINDOW_SECONDS,
+        detail="too many register attempts; please try again later",
+    )
     _validate_email(req.email)
+    _validate_password_strength(req.password)
     email = _normalize_email(req.email)
     now = _utc_now_iso()
     user_id = f"usr_{secrets.token_hex(12)}"
@@ -949,6 +1242,11 @@ def register(req: RegisterRequest) -> AuthResponse:
                 ),
             )
         except psycopg2.IntegrityError as exc:
+            _log_security_event(
+                event_type="auth_register_conflict",
+                ip=ip,
+                details={"email": email},
+            )
             raise HTTPException(status_code=409, detail="email already registered") from exc
 
         token = _create_session(conn, user_id)
@@ -960,13 +1258,33 @@ def register(req: RegisterRequest) -> AuthResponse:
 
     if row is None:
         raise HTTPException(status_code=500, detail="failed to create user")
+    _log_security_event(
+        event_type="auth_register_success",
+        ip=ip,
+        user_id=user_id,
+        details={"email": email},
+    )
     return AuthResponse(token=token, user=_row_to_user(row))
 
 
 @app.post("/auth/login", response_model=AuthResponse)
-def login(req: LoginRequest) -> AuthResponse:
+def login(req: LoginRequest, request: Request) -> AuthResponse:
+    ip = _client_ip(request)
+    _enforce_rate_limit(
+        key=f"auth:login:{ip}",
+        max_requests=AUTH_RATE_LIMIT_MAX_REQUESTS,
+        window_seconds=AUTH_RATE_LIMIT_WINDOW_SECONDS,
+        detail="too many login attempts; please try again later",
+    )
     _validate_email(req.email)
     email = _normalize_email(req.email)
+    if _is_login_temporarily_blocked(email=email, ip=ip):
+        _log_security_event(
+            event_type="auth_login_blocked",
+            ip=ip,
+            details={"reason": "temporary_lockout"},
+        )
+        raise HTTPException(status_code=429, detail="too many login attempts; please try later")
     with _connect_db() as conn:
         row = conn.execute(
             """
@@ -977,12 +1295,39 @@ def login(req: LoginRequest) -> AuthResponse:
             (email,),
         ).fetchone()
         if row is None:
+            failures, lockout_applied = _record_login_failure(email=email, ip=ip)
+            _log_security_event(
+                event_type="auth_login_failed",
+                ip=ip,
+                details={
+                    "reason": "not_found",
+                    "failure_count": failures,
+                    "lockout_applied": lockout_applied,
+                },
+            )
             raise HTTPException(status_code=401, detail="invalid email or password")
         if not _verify_password(req.password, str(row["password_salt"]), str(row["password_hash"])):
+            failures, lockout_applied = _record_login_failure(email=email, ip=ip)
+            _log_security_event(
+                event_type="auth_login_failed",
+                ip=ip,
+                details={
+                    "reason": "password_mismatch",
+                    "failure_count": failures,
+                    "lockout_applied": lockout_applied,
+                },
+            )
             raise HTTPException(status_code=401, detail="invalid email or password")
         token = _create_session(conn, str(row["id"]))
         conn.commit()
         user = _row_to_user(row)
+    _clear_login_failures(email=email, ip=ip)
+    _log_security_event(
+        event_type="auth_login_success",
+        ip=ip,
+        user_id=user.id,
+        details={"email": user.email},
+    )
     return AuthResponse(token=token, user=user)
 
 
@@ -993,20 +1338,35 @@ def auth_me(user: Annotated[UserPublic, Depends(_require_user)]) -> UserPublic:
 
 @app.post("/auth/logout")
 def logout(
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_auth_scheme)],
-    _: Annotated[UserPublic, Depends(_require_user)],
+    user: Annotated[UserPublic, Depends(_require_user)],
 ) -> dict[str, bool]:
     if credentials is not None and credentials.credentials:
         with _connect_db() as conn:
             conn.execute("DELETE FROM sessions WHERE token = %s", (credentials.credentials,))
+    _log_security_event(
+        event_type="auth_logout",
+        ip=_client_ip(request),
+        user_id=user.id,
+        details={},
+    )
     return {"ok": True}
 
 
 @app.post("/jobs", response_model=JobSummary, status_code=202)
 def create_job(
+    request: Request,
     req: JobCreateRequest,
     user: Annotated[UserPublic, Depends(_require_user)],
 ) -> JobSummary:
+    ip = _client_ip(request)
+    _enforce_rate_limit(
+        key=f"job:create:{user.id}:{ip}",
+        max_requests=JOB_RATE_LIMIT_MAX_REQUESTS,
+        window_seconds=JOB_RATE_LIMIT_WINDOW_SECONDS,
+        detail="too many job submissions; please slow down",
+    )
     try:
         suite_path = resolve_suite_path(base_dir=BASE_DIR, suite=req.suite)
     except ValueError as exc:
@@ -1024,6 +1384,7 @@ def create_job(
     api_key = req.api_key.strip()
     if not api_key:
         raise HTTPException(status_code=400, detail="api_key is required")
+    _enforce_job_limits(user_id=user.id)
 
     now = _utc_now_iso()
     job_id = f"job_{secrets.token_hex(12)}"
@@ -1076,6 +1437,18 @@ def create_job(
         seed=req.seed,
         workers=req.workers,
     )
+    _log_security_event(
+        event_type="job_created",
+        ip=ip,
+        user_id=user.id,
+        details={
+            "job_id": job_id,
+            "provider": req.provider,
+            "job_type": req.job_type,
+            "max_cases": req.max_cases,
+            "run_count": req.run_count,
+        },
+    )
     return _row_to_job_summary(row)
 
 
@@ -1112,6 +1485,7 @@ def get_job(
 
 @app.delete("/jobs/{job_id}", status_code=200)
 def cancel_job(
+    request: Request,
     job_id: str,
     user: Annotated[UserPublic, Depends(_require_user)],
 ) -> dict[str, str]:
@@ -1143,6 +1517,12 @@ def cancel_job(
             """,
             ("cancelled", "Cancelled by user", now, now, job_id),
         )
+    _log_security_event(
+        event_type="job_cancelled",
+        ip=_client_ip(request),
+        user_id=user.id,
+        details={"job_id": job_id},
+    )
     return {"status": "cancelled"}
 
 
@@ -1258,7 +1638,14 @@ def get_job_report_pdf(
 
 
 @app.post("/evaluate", response_model=EvaluateResponse)
-def evaluate(req: EvaluateRequest) -> EvaluateResponse:
+def evaluate(req: EvaluateRequest, request: Request) -> EvaluateResponse:
+    ip = _client_ip(request)
+    _enforce_rate_limit(
+        key=f"public:evaluate:{ip}",
+        max_requests=PUBLIC_EVAL_RATE_LIMIT_MAX_REQUESTS,
+        window_seconds=PUBLIC_EVAL_RATE_LIMIT_WINDOW_SECONDS,
+        detail="too many evaluate requests; please try again later",
+    )
     try:
         suite_path = resolve_suite_path(base_dir=BASE_DIR, suite=req.suite)
     except ValueError as exc:
