@@ -52,9 +52,17 @@ class EmbeddingVarianceScorer:
         if matrix.shape[0] != len(texts):
             msg = "embedder output row count must match number of texts"
             raise ValueError(msg)
-        centroid = np.mean(matrix, axis=0)
-        distances = np.sum((matrix - centroid) ** 2, axis=1)
-        raw_variance = float(np.mean(distances))
+        # Mean pairwise squared distance — correctly captures bimodal distributions
+        # e.g. [A, A, A, B, B, B] scores HIGH variance, not LOW like centroid-distance would
+        n = matrix.shape[0]
+        raw_variance = 0.0
+        count = 0
+        for i in range(n):
+            for j in range(i + 1, n):
+                diff = matrix[i] - matrix[j]
+                raw_variance += float(np.dot(diff, diff))
+                count += 1
+        raw_variance = raw_variance / count if count > 0 else 0.0
         normalized = min(raw_variance / self._expected_max_variance, 1.0)
         return VarianceResult(raw_variance=raw_variance, normalized_variance=normalized)
 

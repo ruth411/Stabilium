@@ -456,6 +456,29 @@ def _init_db() -> None:
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_secret TEXT")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN DEFAULT FALSE")
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS email_verification_tokens (
+                token TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at TIMESTAMPTZ NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                token TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at TIMESTAMPTZ NOT NULL
+            )
+            """
+        )
 
 
 class UserPublic(BaseModel):
@@ -465,11 +488,13 @@ class UserPublic(BaseModel):
     email: str
     created_at: str
     mfa_enabled: bool = False
+    email_verified: bool = False
 
 
 class AuthResponse(BaseModel):
     token: str
     user: UserPublic
+    email_verification_token: str | None = None
 
 
 class RegisterRequest(BaseModel):
@@ -577,6 +602,8 @@ class EvaluateResponse(BaseModel):
 def _row_to_user(row: psycopg2.extras.RealDictRow) -> UserPublic:
     raw_mfa = row.get("mfa_enabled")
     mfa_enabled = bool(raw_mfa) if isinstance(raw_mfa, (bool, int)) else False
+    raw_verified = row.get("email_verified")
+    email_verified = bool(raw_verified) if isinstance(raw_verified, (bool, int)) else False
     return UserPublic(
         id=str(row["id"]),
         name=str(row["name"]) if row["name"] else "",
@@ -584,6 +611,7 @@ def _row_to_user(row: psycopg2.extras.RealDictRow) -> UserPublic:
         email=str(row["email"]),
         created_at=str(row["created_at"]),
         mfa_enabled=mfa_enabled,
+        email_verified=email_verified,
     )
 
 
@@ -674,7 +702,7 @@ def _require_user(
     with _connect_db() as conn:
         row = conn.execute(
             """
-            SELECT s.expires_at, u.id, u.name, u.business_name, u.email, u.created_at, u.mfa_enabled
+            SELECT s.expires_at, u.id, u.name, u.business_name, u.email, u.created_at, u.mfa_enabled, u.email_verified
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token = %s
@@ -1440,10 +1468,18 @@ def register(req: RegisterRequest, request: Request) -> AuthResponse:
             raise HTTPException(status_code=409, detail="email already registered") from exc
 
         token = _create_session(conn, user_id)
+        verification_token = secrets.token_urlsafe(32)
+        conn.execute(
+            """
+            INSERT INTO email_verification_tokens (token, user_id, expires_at)
+            VALUES (%s, %s, NOW() + INTERVAL '24 hours')
+            """,
+            (verification_token, user_id),
+        )
         conn.commit()
         row = conn.execute(
             """
-            SELECT id, name, business_name, email, created_at, mfa_enabled
+            SELECT id, name, business_name, email, created_at, mfa_enabled, email_verified
             FROM users
             WHERE id = %s
             """,
@@ -1458,7 +1494,142 @@ def register(req: RegisterRequest, request: Request) -> AuthResponse:
         user_id=user_id,
         details={"email": email},
     )
-    return AuthResponse(token=token, user=_row_to_user(row))
+    return AuthResponse(token=token, user=_row_to_user(row), email_verification_token=verification_token)
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=256)
+
+
+@app.post("/auth/verify-email")
+def verify_email(req: VerifyEmailRequest) -> dict[str, str]:
+    with _connect_db() as conn:
+        row = conn.execute(
+            """
+            SELECT user_id, expires_at FROM email_verification_tokens WHERE token = %s
+            """,
+            (req.token,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=400, detail="invalid or expired verification token")
+        expires_at = _parse_utc_iso(str(row["expires_at"]))
+        if expires_at <= _utc_now():
+            conn.execute("DELETE FROM email_verification_tokens WHERE token = %s", (req.token,))
+            conn.commit()
+            raise HTTPException(status_code=400, detail="invalid or expired verification token")
+        conn.execute(
+            "UPDATE users SET email_verified = TRUE WHERE id = %s",
+            (row["user_id"],),
+        )
+        conn.execute("DELETE FROM email_verification_tokens WHERE token = %s", (req.token,))
+        conn.commit()
+    return {"status": "verified"}
+
+
+class ResendVerificationRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+@app.post("/auth/resend-verification")
+def resend_verification(req: ResendVerificationRequest, request: Request) -> dict[str, str]:
+    ip = _client_ip(request)
+    _enforce_rate_limit(
+        key=f"auth:resend-verification:{ip}",
+        max_requests=5,
+        window_seconds=3600,
+        detail="too many resend attempts; please wait before trying again",
+    )
+    email = _normalize_email(req.email)
+    with _connect_db() as conn:
+        row = conn.execute(
+            "SELECT id, email_verified FROM users WHERE email = %s",
+            (email,),
+        ).fetchone()
+        if row is None or row["email_verified"]:
+            # Return OK regardless to avoid email enumeration
+            return {"status": "ok"}
+        user_id = str(row["id"])
+        conn.execute(
+            "DELETE FROM email_verification_tokens WHERE user_id = %s",
+            (user_id,),
+        )
+        verification_token = secrets.token_urlsafe(32)
+        conn.execute(
+            """
+            INSERT INTO email_verification_tokens (token, user_id, expires_at)
+            VALUES (%s, %s, NOW() + INTERVAL '24 hours')
+            """,
+            (verification_token, user_id),
+        )
+        conn.commit()
+    return {"status": "ok", "email_verification_token": verification_token}
+
+
+class RequestPasswordResetRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+@app.post("/auth/request-password-reset")
+def request_password_reset(req: RequestPasswordResetRequest, request: Request) -> dict[str, str]:
+    ip = _client_ip(request)
+    _enforce_rate_limit(
+        key=f"auth:password-reset:{ip}",
+        max_requests=5,
+        window_seconds=3600,
+        detail="too many password reset requests; please wait before trying again",
+    )
+    email = _normalize_email(req.email)
+    with _connect_db() as conn:
+        row = conn.execute("SELECT id FROM users WHERE email = %s", (email,)).fetchone()
+        if row is None:
+            # Return OK to avoid email enumeration
+            return {"status": "ok"}
+        user_id = str(row["id"])
+        conn.execute("DELETE FROM password_reset_tokens WHERE user_id = %s", (user_id,))
+        reset_token = secrets.token_urlsafe(32)
+        conn.execute(
+            """
+            INSERT INTO password_reset_tokens (token, user_id, expires_at)
+            VALUES (%s, %s, NOW() + INTERVAL '1 hour')
+            """,
+            (reset_token, user_id),
+        )
+        conn.commit()
+    return {"status": "ok", "reset_token": reset_token}
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+@app.post("/auth/reset-password")
+def reset_password(req: ResetPasswordRequest) -> dict[str, str]:
+    _validate_password_strength(req.new_password)
+    with _connect_db() as conn:
+        row = conn.execute(
+            "SELECT user_id, expires_at FROM password_reset_tokens WHERE token = %s",
+            (req.token,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=400, detail="invalid or expired reset token")
+        expires_at = _parse_utc_iso(str(row["expires_at"]))
+        if expires_at <= _utc_now():
+            conn.execute("DELETE FROM password_reset_tokens WHERE token = %s", (req.token,))
+            conn.commit()
+            raise HTTPException(status_code=400, detail="invalid or expired reset token")
+        user_id = str(row["user_id"])
+        new_salt = secrets.token_hex(16)
+        new_hash = _hash_password(req.new_password, new_salt)
+        conn.execute(
+            "UPDATE users SET password_salt = %s, password_hash = %s WHERE id = %s",
+            (new_salt, new_hash, user_id),
+        )
+        # Invalidate all active sessions after password reset
+        conn.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+        conn.execute("DELETE FROM password_reset_tokens WHERE token = %s", (req.token,))
+        conn.commit()
+    return {"status": "ok"}
 
 
 @app.post("/auth/login", response_model=AuthResponse)
