@@ -457,7 +457,8 @@ def _init_db() -> None:
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_secret TEXT")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN DEFAULT FALSE")
         conn.execute(
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE"
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified "
+            "BOOLEAN NOT NULL DEFAULT FALSE"
         )
         conn.execute(
             """
@@ -702,7 +703,8 @@ def _require_user(
     with _connect_db() as conn:
         row = conn.execute(
             """
-            SELECT s.expires_at, u.id, u.name, u.business_name, u.email, u.created_at, u.mfa_enabled, u.email_verified
+            SELECT s.expires_at, u.id, u.name, u.business_name, u.email,
+                   u.created_at, u.mfa_enabled, u.email_verified
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token = %s
@@ -1494,7 +1496,9 @@ def register(req: RegisterRequest, request: Request) -> AuthResponse:
         user_id=user_id,
         details={"email": email},
     )
-    return AuthResponse(token=token, user=_row_to_user(row), email_verification_token=verification_token)
+    return AuthResponse(
+        token=token, user=_row_to_user(row), email_verification_token=verification_token
+    )
 
 
 class VerifyEmailRequest(BaseModel):
