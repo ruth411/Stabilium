@@ -319,8 +319,7 @@ def _connect_db() -> _DBWrapper:
 
 def _init_db() -> None:
     with _connect_db() as conn:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL DEFAULT '',
@@ -330,20 +329,16 @@ def _init_db() -> None:
                 password_hash TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -365,10 +360,8 @@ def _init_db() -> None:
                 result_json TEXT,
                 completed_cases INTEGER NOT NULL DEFAULT 0
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_traces (
                 id SERIAL PRIMARY KEY,
                 job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -377,10 +370,8 @@ def _init_db() -> None:
                 trace_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS security_events (
                 id SERIAL PRIMARY KEY,
                 user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
@@ -389,15 +380,13 @@ def _init_db() -> None:
                 details_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
-            """
-        )
+            """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_traces_job_id ON agent_traces(job_id)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_security_events_created_at "
             "ON security_events(created_at)"
         )
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS auth_throttles (
                 identity_hash TEXT PRIMARY KEY,
                 failures INTEGER NOT NULL,
@@ -405,35 +394,30 @@ def _init_db() -> None:
                 locked_until TEXT,
                 updated_at TEXT NOT NULL
             )
-            """
-        )
+            """)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_auth_throttles_locked_until "
             "ON auth_throttles(locked_until)"
         )
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS rate_limit_events (
                 id SERIAL PRIMARY KEY,
                 rl_key TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
-            """
-        )
+            """)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_rate_limit_events_key_time "
             "ON rate_limit_events(rl_key, created_at)"
         )
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS ip_blocks (
                 ip TEXT PRIMARY KEY,
                 blocked_until TEXT NOT NULL,
                 reason TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
-            """
-        )
+            """)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_ip_blocks_blocked_until " "ON ip_blocks(blocked_until)"
         )
@@ -460,26 +444,22 @@ def _init_db() -> None:
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified "
             "BOOLEAN NOT NULL DEFAULT FALSE"
         )
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS email_verification_tokens (
                 token TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 expires_at TIMESTAMPTZ NOT NULL
             )
-            """
-        )
-        conn.execute(
-            """
+            """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS password_reset_tokens (
                 token TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 expires_at TIMESTAMPTZ NOT NULL
             )
-            """
-        )
+            """)
 
 
 class UserPublic(BaseModel):
